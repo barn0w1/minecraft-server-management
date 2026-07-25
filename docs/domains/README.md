@@ -1,5 +1,7 @@
 # Domain overview
 
+主要resourceの関係を初めて読む場合は、先に[System model](../system-model.md)を参照してください。
+
 主要domainは次の四つです。
 
 ```text

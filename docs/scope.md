@@ -40,7 +40,7 @@
 - public remote Operator API
 - web dashboardを初期要件にすること
 - Node pool、bin packing、automatic workload migration
-- old prototypeとのbackward compatibility
+- pre-stable RPC、database、configuration、CLI、certificate profileとのbackward compatibility
 
 ## Development compatibility
 

@@ -158,4 +158,4 @@ mcserver-enroll/1
 mcserver-agent/1
 ```
 
-method-level capabilityとschema versionはinitial report/capability exchangeで扱います。古いprototypeのALPN名とのcompatibilityは提供しません。
+method-level capabilityとschema versionはinitial report/capability exchangeで扱います。最初のstable protocol contractまでは、旧wire identifierやschemaとのcompatibilityを保証しません。

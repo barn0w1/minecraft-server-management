@@ -15,7 +15,7 @@ Akamai CloudのCompute Instanceを、上位domainが利用できるidentity付�
 - `AgentSession`
 - `ComputeInstanceBinding`
 
-初期実装で`NodeClaim`を別resourceとして導入するかは、Node Management v1 planで必要性を判断します。過去のresource名を互換性目的で維持しません。
+Nodeと、Nodeを要求するrequest/claim resourceを分離する必要があるかは、[Node Management v1 plan](../plans/node-management-v1.md)のP0 decisionです。必要性が証明されるまでは追加resourceを確定しません。
 
 ## Responsibilities
 

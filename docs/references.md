@@ -27,6 +27,7 @@ Minecraft Server Management Protocolは更新されるため、supported Minecra
 ## Server Data
 
 - restic documentation: <https://restic.readthedocs.io/en/stable/>
+- restic repositories with empty password: <https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html#repositories-with-empty-password>
 - restic repository design and terminology: <https://restic.readthedocs.io/en/stable/100_references.html>
 - Cloudflare R2 S3 API: <https://developers.cloudflare.com/r2/get-started/s3/>
 - Cloudflare R2 S3 compatibility: <https://developers.cloudflare.com/r2/api/s3/api/>

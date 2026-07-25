@@ -2,16 +2,20 @@
 
 A self-hosted system for managing Minecraft server lifecycles, infrastructure, workloads, and data.
 
-このrepositoryは、小規模なcommunityがMinecraft serverを便利に、安全に、堅固に運用するためのmanagement systemを新しく構築するためのものです。企業向けSaaSやmulti-tenant hosting platformを目標にはしませんが、data保全、identity、ownership、restart recovery、destructive operationの安全性は規模に関係なく重視します。
+Minecraft Server Management Systemは、小規模なcommunityが自分たちのMinecraft serverを便利に、安全に、堅固に運用するためのsystemです。Cloud上のGNU/Linux machineを確保し、Minecraft Serverを実行し、永続dataをbackup・restoreし、起動から停止までのlifecycleを一つのdesired stateとして管理します。
 
-現在は**design-first foundation**の段階です。実装はまだ置かず、過去のprototypeと設計経験から有効な知識だけを抽出し、現在の正本となるdocumentationを整備しています。
+## What this repository contains
 
-## Components
+このrepositoryは、system全体のarchitecture、domain boundary、process間contract、security model、implementation planを定義します。現在は**documentation-first foundation**の段階であり、source codeはまだありません。
+
+最初の実装対象は、Akamai Cloud上にCompute Instanceを作成し、Node Agentをenrollさせ、安全に利用・削除できる`Node Management v1`です。
+
+## System at a glance
 
 ```text
 Operator clients
   ├─ mcserverctl
-  └─ local automation / Discord bot
+  └─ local automation / Discord Bot
           │
           │ JSON-RPC over Unix domain socket
           ▼
@@ -22,26 +26,29 @@ mcserver-control-plane
 mcserver-node-agent
           │
           ├─ Minecraft Server control
-          ├─ Server Data operations
+          ├─ Server Data backup and restore
           ├─ Workload Runtime
           └─ Node observation and operations
 ```
 
-- **Control Plane**: desired state、durable state、policy、controller、orchestrationを所有する中央process
-- **Node Agent**: 管理対象Node上でlocal operationとobservationを提供する常駐process
-- **`mcserverctl`**: Control PlaneのOperator APIを利用するfull-control CLI
+- **Control Plane**はdesired state、durable state、policy、controller、orchestrationを所有します。
+- **Node Agent**は各managed Nodeに常駐し、local operationとobservationを提供します。
+- **`mcserverctl`**はControl PlaneのOperator APIを利用するfull-control CLIです。
+- **Discord Botやlocal automation**も、最初はCLIと同じlocal Operator APIを使用するtrusted clientです。
+
+Systemのresource、process、lifecycleを初めて読む場合は、[`docs/system-model.md`](docs/system-model.md)から読むと全体像をつかめます。
 
 ## Documentation
 
-設計の入口は[`docs/index.md`](docs/index.md)です。
+Documentationの入口は[`docs/index.md`](docs/index.md)です。
 
-特に最初に読む文書:
+推奨する最初の読み順:
 
 1. [`docs/vision.md`](docs/vision.md)
-2. [`docs/terminology.md`](docs/terminology.md)
-3. [`docs/design-lineage.md`](docs/design-lineage.md)
-4. [`docs/architecture/overview.md`](docs/architecture/overview.md)
-5. [`docs/design-principles.md`](docs/design-principles.md)
+2. [`docs/system-model.md`](docs/system-model.md)
+3. [`docs/scope.md`](docs/scope.md)
+4. [`docs/terminology.md`](docs/terminology.md)
+5. [`docs/architecture/overview.md`](docs/architecture/overview.md)
 6. [`docs/plans/foundation.md`](docs/plans/foundation.md)
 
-AI agentとrepository作業者は、変更前に[`AGENTS.md`](AGENTS.md)を確認してください。
+Repositoryを変更する人またはAI agentは、最初に[`AGENTS.md`](AGENTS.md)も確認してください。

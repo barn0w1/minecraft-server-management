@@ -22,4 +22,4 @@ ADRは長期的なarchitecture判断の理由とconsequenceを保存します。
 | [0007](0007-use-akamai-as-initial-compute-provider.md) | initial compute providerをAkamai Cloudにする | Accepted |
 | [0008](0008-do-not-build-stateful-provider-fakes.md) | stateful provider fakeを作らない | Accepted |
 | [0009](0009-use-podman-quadlet-and-systemd.md) | Workload RuntimeにPodman、Quadlet、systemdを使用する | Accepted |
-| [0010](0010-use-restic-on-r2-for-server-data.md) | Server Data backupにrestic repository on R2を使用する | Accepted |
+| [0010](0010-use-restic-on-r2-for-server-data.md) | R2上のrestic repositoryをempty passwordで使用する | Accepted |

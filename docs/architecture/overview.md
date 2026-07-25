@@ -1,5 +1,7 @@
 # Architecture overview
 
+この文書はsystem全体のdependency、process boundary、authorityを要約します。resourceとend-to-end lifecycleの導入は[`system-model.md`](../system-model.md)を参照してください。
+
 ## System shape
 
 Minecraft Server Management Systemは、二つのmodular monolithと複数のexternal systemから構成されます。

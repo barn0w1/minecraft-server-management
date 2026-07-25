@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Minecraft Serverの完全な永続file treeをNode lifecycleから分離し、backup、restore、verification、retentionを管理します。
+Minecraft Serverの完全なpersistent file treeをNode lifecycleから分離し、backup、restore、verification、retentionを管理します。
 
 ## Owned concepts
 
@@ -52,15 +52,37 @@ Minecraft固有のsaveはMinecraft Server domainが実行し、保存可能なco
 
 ## Repository model
 
-initial direction:
+Accepted direction:
 
-- persistentなMinecraft Server operation unitごとに一つのrestic repository
+- 永続dataを共有する一つのlogical Minecraft Serverごとに一つのrestic repository
 - 一つのrepository内に複数のSnapshotを保持
 - backendはCloudflare R2のS3-compatible endpoint
-- repository identityとcredential scopeをServer Data identityへbindingする
-- backup successだけでなくSnapshotの存在と必要なverificationを確認する
+- repository identityとR2 credential scopeをServer Data identityへbindingする
+- backup subprocessの終了だけでなく、Snapshotの存在と必要なverificationを確認する
+- restic repository passwordは空文字列
+- restic password secretは作成・保存しない
 
-restic repositoryは常に暗号化formatを使用します。空passwordを採用する場合も暗号化処理自体は存在しますが、repository read accessを得た主体に対する有効なsecrecy boundaryとはみなしません。主要なaccess boundaryはR2 credential、resource isolation、least privilegeです。
+restic repository formatは常に暗号化・認証されますが、empty passwordはconfidentiality boundaryではありません。repository objectをreadできる主体はdataを復号できるものとして扱い、R2 credential、bucket/prefix isolation、least privilegeを主要access boundaryとします。
+
+Node Agentのrestic adapterは、empty password repositoryを扱うすべてのcommandへ`--insecure-no-password`を明示的に付与します。Control Plane RPCへraw restic commandやpassword optionを露出させません。
+
+詳細な判断理由とsecurity consequenceは[ADR-0010](../adr/0010-use-restic-on-r2-for-server-data.md)を参照してください。
+
+## Backup result
+
+`restic backup` processが終了code 0を返したことだけを、Server Dataが保護された最終証拠にはしません。
+
+Backup operationは少なくとも次を関連付けます。
+
+- 対象となる`ServerData` identity
+- source Nodeとpath
+- consistency pointまたはMinecraft save operation
+- 作成されたSnapshot ID
+- repository identity
+- verification policyと結果
+- operation timestamps
+
+どのverificationをbackupごとに必須とするか、full data readをどの頻度で行うかはServer Data milestoneで定義します。
 
 ## Non-responsibilities
 
@@ -68,3 +90,4 @@ restic repositoryは常に暗号化formatを使用します。空passwordを採�
 - Workloadをいつ起動するか
 - Nodeをいつ削除するか
 - file内容のdomain validation
+- R2 account全体のidentity management

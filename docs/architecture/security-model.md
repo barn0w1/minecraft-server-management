@@ -64,6 +64,8 @@ Akamai resourceにはDeployment IDとNode IDへ対応するmachine-readable owne
 ## Secrets
 
 - Akamai credential、R2 credential、issuing keyはdaemon-readable secret fileまたは専用secret storeから読み込む
+- restic repository passwordはempty passwordとし、password secret、password file、password environment variableを作成しない
+- empty restic passwordはconfidentiality boundaryではない。R2 credentialとbucket/prefix access controlをrepository dataの主要boundaryとする
 - command-line argument、environment dump、structured log、databaseへplaintext secretを残さない
 - Node Agentへ必要なcredentialだけをscope限定して渡す
 - evidenceとaudit recordはredaction済みとする
