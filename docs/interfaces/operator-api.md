@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Operator clientがControl Planeのdesired state、query、Operation、Incidentを操作するlocal APIです。
+Operator ClientがMinecraftServer Spec、query、Operation、Snapshot、Incidentを操作するlocal APIです。
 
 ## Clients
 
@@ -10,11 +10,9 @@ Operator clientがControl Planeのdesired state、query、Operation、Incident�
 - Discord Bot
 - local automation
 
-全clientはdatabase、Akamai Cloud、Node Agentへ直接接続しません。
+全clientはSQLite、Akamai、Node Agent、RCONへ直接接続しません。
 
 ## Transport
-
-initial contract:
 
 ```text
 JSON-RPC 2.0
@@ -28,38 +26,83 @@ socket:
 /run/mcserver/control-plane.sock
 ```
 
-TLSは使用せず、filesystem permissionとUnix peer credentialをauthentication boundaryとします。HTTP version/libraryはimplementation前に再検証できますが、public TCP endpointにはしません。
-
-## Authorization
-
-初期実装ではsocket accessを持つclientはfull-control Operatorです。Discord userごとのauthorizationはDiscord Bot側で行います。将来Control Plane側でfine-grained authorizationが必要になった場合は、別ADRとidentity modelを追加します。
+TLSは使用せず、filesystem permissionとUnix peer credentialをauthentication boundaryとします。
 
 ## JSON-RPC profile
 
-- versionは`2.0`だけ
-- request/response IDはcanonical UUIDv7 stringを推奨
-- `params`はnamed object
-- batchは初期実装で無効
-- unknown fieldは拒否
-- errorはstableな`data.kind`を持つ
-- long-running mutationはdurable Operation IDを返す
-- timeoutはoperationが未実行だったことを意味しない
+- `jsonrpc`は`"2.0"`
+- request IDはcanonical UUID string
+- `params`はobject
+- batchとnotificationはv1で使用しない
+- unknown fieldはschema validation error
+- stable errorは`error.data.kind`を持つ
+- long-running mutationはOperationを返す
+- client timeoutはOperation未作成を意味しないため、request IDまたはidempotency keyで再照会できる
 
 ## Method namespaces
 
-候補となるtop-level namespace:
+initial namespace:
 
 ```text
+system.*
 server.*
 node.*
-backup.*
-restore.*
+snapshot.*
 operation.*
 incident.*
 ```
 
-exact methodとschemaは各milestoneで追加します。CLI commandとRPC methodを一対一に固定せず、CLIは複数queryを組み合わせてhuman-readable表示を作れます。
+representative methods:
 
-## Audit actor
+```text
+system.version
+server.create
+server.get
+server.list
+server.spec.update
+server.start
+server.stop
+server.backup
+server.restore
+node.get
+node.list
+operation.get
+operation.list
+operation.cancel
+snapshot.list
+incident.list
+incident.resolve
+```
 
-Control Planeが観測できるUnix peer identityをauthentication actorとして保存します。BotはDiscord user metadataを追加できますが、これはtrusted clientが申告したaudit contextであり、Control PlaneがDiscord userを直接認証した証拠ではありません。
+exact schemaは各milestoneで追加します。
+
+## Mutation semantics
+
+mutation requestにはclient-generated `request_key`を持たせます。Control Planeは同じactor、method、request key、payload hashに対して同じOperationまたはresultを返せます。
+
+JSON-RPC IDはtransport correlationであり、mutation idempotency keyではありません。
+
+## Status response
+
+`server.get`は少なくとも次を返せるようにします。
+
+```text
+desired state
+spec generation
+current phase
+Conditions
+active Node
+Agent freshness
+applied generation
+runtime state
+latest successful Snapshot
+active Operation and stage
+next retry time
+last error summary
+```
+
+## Authorization and audit
+
+socket accessを持つclientはfull-control Operatorです。Control PlaneはUnix peer identityをauthentication actorとして保存します。
+
+Discord BotはDiscord user metadataをaudit contextとして追加できますが、Control PlaneがそのDiscord userを直接認証した証拠とはみなしません。

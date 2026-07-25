@@ -1,22 +1,18 @@
 # Documentation index
 
-このdirectoryは、Minecraft Server Management Systemの**現在の設計の正本**です。
-
-読者は、このsystem、過去の会話、以前のprototype、旧repositoryについて何も知らないことを前提にしています。current designを理解するために外部の履歴を読む必要はありません。文書だけで目的、用語、resource、process、authority、failure model、interface contractを再構築できる状態を維持します。
+このdirectoryはMinecraft Server Management Systemの**現在の設計の正本**です。current designはrepository内だけで理解できる状態を維持します。
 
 ## First reading path
 
-1. [Vision](vision.md) — 何のためのsystemか
-2. [System model](system-model.md) — 何を管理し、processとdomainがどう協調するか
-3. [Scope](scope.md) — 何を含み、何を含まないか
-4. [Terminology](terminology.md) — resourceとcomponentの正式名称
-5. [Design principles](design-principles.md) — 長期的な判断基準
-6. [Architecture overview](architecture/overview.md) — dependency、authority、process boundary
-7. [Domain overview](domains/README.md) — Node、Workload、Server Data、Minecraft Server
-8. [Interfaces](interfaces/README.md) — Operator APIとAgent Protocol
-9. [Foundation plan](plans/foundation.md) — 実装開始時の順序
-
-この順序は必須のprerequisite chainではありませんが、初見の読者に最短で共通mental modelを作ります。
+1. [Vision](vision.md) — systemが提供する価値
+2. [System model](system-model.md) — resource、process、lifecycleの全体像
+3. [Scope](scope.md) — v1で実装するものとしないもの
+4. [Terminology](terminology.md) — project内の正式な概念
+5. [Design principles](design-principles.md) — 判断基準
+6. [Architecture overview](architecture/overview.md) — authorityとdependency
+7. [Domain overview](domains/README.md) — Minecraft Server、Server Home、Node
+8. [Interfaces](interfaces/README.md) — Operator API、Agent API、local Minecraft control
+9. [Plans](plans/README.md) — milestoneと実装順序
 
 ## Find information by question
 
@@ -26,51 +22,50 @@
 | resourceとprocessはどう関係するか | [`system-model.md`](system-model.md) |
 | 現在の対象範囲は何か | [`scope.md`](scope.md) |
 | 用語の正確な意味は何か | [`terminology.md`](terminology.md) |
-| system全体のdependencyとauthorityは何か | [`architecture/overview.md`](architecture/overview.md) |
-| processはどこで動き、何を所有するか | [`architecture/process-model.md`](architecture/process-model.md) |
-| state、reconciliation、restart recoveryはどう動くか | [`architecture/state-and-reconciliation.md`](architecture/state-and-reconciliation.md) |
-| failureとIncidentをどう分類するか | [`architecture/failure-model.md`](architecture/failure-model.md) |
-| trust boundary、PKI、secretはどう扱うか | [`architecture/security-model.md`](architecture/security-model.md) |
-| domainごとの責務とnon-responsibilityは何か | [`domains/`](domains/README.md) |
-| process間protocolは何か | [`interfaces/`](interfaces/README.md) |
-| なぜそのarchitectureを選んだか | [`adr/`](adr/README.md) |
+| system全体のauthorityは何か | [`architecture/overview.md`](architecture/overview.md) |
+| moduleをどう分けるか | [`architecture/module-boundaries.md`](architecture/module-boundaries.md) |
+| Operationとreconciliationはどう動くか | [`architecture/state-and-reconciliation.md`](architecture/state-and-reconciliation.md) |
+| retryやunknown outcomeをどう扱うか | [`architecture/failure-model.md`](architecture/failure-model.md) |
+| credentialとtrust boundaryは何か | [`architecture/security-model.md`](architecture/security-model.md) |
+| Minecraft runtimeをどう扱うか | [`domains/minecraft-server.md`](domains/minecraft-server.md) |
+| `/data`と設定をどうbackupするか | [`domains/server-home.md`](domains/server-home.md) |
+| process間contractは何か | [`interfaces/`](interfaces/README.md) |
+| なぜその判断をしたか | [`adr/`](adr/README.md) |
 | どの順番で実装するか | [`plans/`](plans/README.md) |
-| repositoryをどう管理するか | [`development/`](development/repository-management.md) |
-| external specificationはどこにあるか | [`references.md`](references.md) |
+| external specificationはどこか | [`references.md`](references.md) |
 
 ## Authoritative locations
 
 | Information | Authority |
 | --- | --- |
-| systemの目的と非目的 | [`vision.md`](vision.md)、[`scope.md`](scope.md) |
-| system resourceとend-to-end lifecycle | [`system-model.md`](system-model.md) |
-| 用語と命名 | [`terminology.md`](terminology.md) |
-| 現在のsystem構造 | [`architecture/`](architecture/overview.md) |
-| domain conceptとinvariant | [`domains/`](domains/README.md) |
-| process間contract | [`interfaces/`](interfaces/README.md) |
-| 長期的な判断理由 | [`adr/`](adr/README.md) |
-| 実装順序とmilestone | [`plans/`](plans/README.md) |
-| repository運用 | [`development/`](development/repository-management.md) |
-| 外部仕様の参照先 | [`references.md`](references.md) |
+| purposeとnon-goal | [`vision.md`](vision.md)、[`scope.md`](scope.md) |
+| resourceとend-to-end lifecycle | [`system-model.md`](system-model.md) |
+| terminology | [`terminology.md`](terminology.md) |
+| current architecture | [`architecture/`](architecture/overview.md) |
+| domain invariant | [`domains/`](domains/README.md) |
+| process boundary contract | [`interfaces/`](interfaces/README.md) |
+| decision history | [`adr/`](adr/README.md) |
+| milestoneとacceptance | [`plans/`](plans/README.md) |
+| external primary references | [`references.md`](references.md) |
 
 ## Document types
 
 ### Current design
 
-`vision.md`、`system-model.md`、`scope.md`、`terminology.md`、`design-principles.md`、`architecture/`、`domains/`、`interfaces/`はliving documentsです。現在の実装が従うべき設計を直接説明します。
+`vision.md`、`system-model.md`、`scope.md`、`terminology.md`、`design-principles.md`、`architecture/`、`domains/`、`interfaces/`はliving documentsです。
 
 ### Decision history
 
-`adr/`は「なぜその方針を選んだか」を保存します。ADRを読まなくてもcurrent designを理解できる状態を維持します。
+`adr/`は判断理由を保存します。current contractの詳細はcurrent design documentに置きます。
 
 ### Implementation plans
 
-`plans/`は実装順序、scope、acceptance criteriaを定義します。planはarchitectureの正本ではありません。
+`plans/`は実装順序とacceptance criteriaを定義します。planはarchitectureの正本ではありません。
 
 ### Optional historical context
 
-[`development/design-lineage.md`](development/design-lineage.md)は、このrepositoryより前の試行から何を学び、何をresetしたかを説明します。current designの理解や変更に必須ではなく、normative contractでもありません。
+[`development/design-lineage.md`](development/design-lineage.md)は過去の設計から何を簡素化したかを説明します。current designの理解に必須ではありません。
 
 ## Writing policy
 
-本文は日本語を基本にし、domain term、protocol名、identifierはEnglishを保ちます。文書は過去の会話を参照せず自己完結させ、同じ事実を複数documentへ複製せず正本へlinkします。
+本文は日本語を基本にし、identifier、protocol field、official product名はEnglishを保ちます。一つの事実に一つの正本を持ち、overviewは詳細contractを複製せずlinkします。

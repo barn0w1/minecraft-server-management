@@ -1,20 +1,17 @@
 # ADR-0006: Use a private PKI with an offline Root CA
 
-Status: Accepted
+Status: Superseded by ADR-0012
 
 ## Context
 
-Node Agentはpublic internet上のstable endpointへ接続するが、public CAだけではNode client identityを発行・lifecycle管理できない。
+Node client identityをcertificateで表現し、Control Plane serverとAgentをmutual TLSで認証するためprivate PKIを選択しました。
 
-## Decision
+## Original decision
 
-Control Plane server identityとNode Agent client identityにprivate PKIを使用する。Root CA private keyはofflineに保管し、server issuerとAgent issuerを分離する。
+Offline Root CA、separate issuing intermediates、short-lived Agent certificatesをv1 foundationとしました。
 
-## Consequences
+## Supersession
 
-CA custody、enrollment、rotation、authorization、issuer compromise responseが必要になる。初期revocationはshort-lived certificateとserver-side active Node authorizationを組み合わせる。
+small-community向けv1としてCA custody、issuer、rotation、revocationの実装負担が大きく、automation価値へ直接つながりませんでした。
 
-## Related documents
-
-- [Design principles](../design-principles.md)
-- [Architecture overview](../architecture/overview.md)
+[ADR-0012](0012-use-json-rpc-over-http2-agent-pull.md)はserver TLSとper-Node bearer credentialをv1 contractとし、mTLSをfuture hardeningへ移します。

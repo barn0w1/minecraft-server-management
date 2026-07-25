@@ -1,196 +1,185 @@
 # System model
 
-この文書は、Minecraft Server Management Systemを初めて読む人向けに、管理対象、主要resource、process、dependency、end-to-end lifecycleを一つのmental modelとして説明します。
+この文書は、Minecraft Server Management Systemのresource、process、state、end-to-end lifecycleを一つのmental modelとして説明します。
 
-## What the system manages
+## Primary resources
 
-Operatorが管理したい対象は、単なるCloud VMや一つのJava processではありません。
+Operatorから見える主要resourceは四つです。
 
 ```text
-Minecraft Server
-  ├─ Minecraft固有のdesired stateとoperation
-  ├─ Server Data
-  ├─ Workload
-  └─ execution先となるNode
+MinecraftServer
+Node
+Snapshot
+Operation
 ```
 
-Systemはこれらを別resourceとして扱い、最上位のMinecraft Server lifecycleで協調させます。
+### MinecraftServer
 
-### Minecraft Server
+管理対象のlogical Minecraft serverです。desired lifecycle、Minecraft version、server type、itzg configuration、automation policy、active Node、current statusを持ちます。
 
-Minecraft固有のlogical resourceです。Minecraft version、server distribution、configuration、application readiness、save、graceful stop、playerやserver stateなどを扱います。
-
-`Minecraft Server`はlogical resourceの名称です。Node上で実際に動くJava processだけを指す場合は`Minecraft Server process`と表記します。
-
-### Server Data
-
-Minecraft Serverに属する永続file treeです。world、player data、plugins、mods、configuration、server software固有dataなどを含みます。
-
-Server Data domainはfileの内容をMinecraftの意味として解釈せず、opaqueなbytes、path、metadata、Snapshotとして管理します。Minecraft固有のsave consistencyはMinecraft Server domainが作ります。
-
-### Workload
-
-Node上でprogramを安全に実行するためのdesired execution unitです。container image、process、environment、mount、port、resource limit、systemd unitなどを扱います。
-
-Minecraft ServerはWorkloadとして実行されますが、Workload domainはMinecraft commandやplayerの意味を知りません。
+`MinecraftServer`はlogical resourceです。Node上のJava processだけを指す場合は`Minecraft Server process`と表記します。
 
 ### Node
 
-Workloadを実行できるmanaged GNU/Linux machineです。Nodeはsystem上のlogical resourceであり、Akamai Cloud上の`Compute Instance`とは別identityです。
+Minecraft Serverを実行できるmanaged GNU/Linux machineです。system上の`Node ID`とcloud provider上の`Compute Instance ID`は別identityです。
+
+Nodeは交換可能です。v1では一つのNodeへ同時に一つのMinecraft Serverだけをallocateします。
+
+### Snapshot
+
+restic repositoryへ成功して保存された`Server Home`の時点copyです。SnapshotはMinecraft Server ID、spec generation、source Node、consistency modeと関連付けます。
+
+### Operation
+
+start、stop、backup、restore、update、Node provision、Node deleteなどの長時間処理を追跡するdurable resourceです。Operationは現在stage、attempt、next retry、resultを持ち、Control Plane restart後も再開できます。
+
+## Internal concepts
+
+### Server Home
+
+一つのMinecraft Serverを復元して起動するためのNode-local directoryです。
 
 ```text
-Node ID                  systemのlogical identity
-Compute Instance ID      cloud provider上のresource identity
+/var/lib/mcserver/servers/<server-id>/
+├─ manifest.json
+├─ secrets/
+│  └─ rcon-password
+└─ data/
 ```
 
-Nodeは交換可能です。Compute Instanceが失われても、Server Dataをverified Snapshotから新しいNodeへrestoreできることを目指します。
+- `data/`はitzg/minecraft-serverの`/data`へmountする
+- `manifest.json`は適用されたMinecraft Server spec、image reference、environment、port、resource setting、generationを記録する
+- `secrets/`はそのMinecraft Serverの起動に必要なserver-local secretを保持する
+- Server Home全体をresticのbackup・restore対象にする
+
+これによりSnapshotはworldだけでなく、そのworldをどの設定で起動していたかも保持します。
+
+### Server Runtime
+
+Node AgentがServer Homeからmaterializeする実行環境です。v1では必ず次で構成します。
+
+```text
+systemd unit
+  → Podman / Quadlet
+  → itzg/minecraft-server container
+  → Server Home/data mounted at /data
+```
+
+Server Runtimeは独立したpublic resourceではなく、MinecraftServerのNode-local実装です。
+
+### Observation, Condition, Event
+
+- `Observation`: Agent、provider、systemd、Podman、RCON、resticから得たtimestamp付き事実
+- `Condition`: 現在状態を要約する`Ready`、`Progressing`、`Degraded`などのderived state
+- `Event`: `RuntimeStarted`、`BackupSucceeded`などのboundedな履歴
 
 ## Running processes
 
-System自身の主要processは二つです。
-
 ```text
-Control Plane VM                         Managed Node
-┌──────────────────────────┐             ┌──────────────────────────┐
-│ mcserver-control-plane   │   QUIC      │ mcserver-node-agent      │
-│                          │◀═══════════▶│                          │
-│ desired state            │   mTLS      │ local execution          │
-│ durable operations       │  JSON-RPC   │ local observation        │
-│ controllers              │             │ local adapters           │
-└──────────────────────────┘             └──────────────────────────┘
+Control Plane host                       Managed Node
+┌────────────────────────────┐           ┌────────────────────────────┐
+│ mcserver-control-plane     │           │ mcserver-node-agent        │
+│                            │◀──────────│                            │
+│ SQLite                     │ HTTPS/h2  │ local operation journal    │
+│ controllers                │ JSON-RPC  │ Podman/Quadlet/systemd      │
+│ durable Operations         │ Agent pull│ itzg/RCON/restic            │
+└────────────┬───────────────┘           └────────────────────────────┘
+             │
+             └─ Akamai API / Cloudflare R2 metadata
 ```
 
 ### Control Plane
 
-Control Planeは中央のauthorityです。
+Control Planeは中央authorityです。
 
-- Operatorが要求したdesired stateを永続化する
-- controllerを実行する
-- domain間のoperation順序を決める
-- durable OperationとIncidentを所有する
-- external stateをObservationとして保存する
-- Node Agentへtyped operationを送る
+- OperatorのSpecを永続化する
+- resourceをreconcileする
+- Operationを作成・進行する
+- Agentへ実行commandを割り当てる
+- provider APIを呼ぶ
+- ConditionとEventを生成する
 
 ### Node Agent
 
-Node Agentは各managed Nodeに常駐するnode-local execution planeです。
+Node AgentはNode-local mechanismを所有します。
 
-- GNU/Linuxとsystemdを観測する
-- Podman、Quadlet、systemdを通してWorkloadを操作する
-- resticとfilesystemを通してServer Data operationを実行する
-- Minecraft Server Management ProtocolやRCONを通してMinecraft Server processを操作する
-- Control Planeへheartbeat、report、operation resultを送る
+- Agent APIへoutbound HTTP/2 syncを行う
+- commandをlocal journalへ記録する
+- same commandを再受信しても同じeffectへ収束させる
+- Server Homeを作成・restoreする
+- Quadletをmaterializeし、itzg runtimeを起動・停止する
+- RCON、systemd、Podmanを観測する
+- restic backup・restoreを実行する
 
-Node Agentは多くのlocal機能を持ちますが、一つの巨大なmoduleではありません。`node`、`workload`、`server_data`、`minecraft`のcapabilityを分離したmodular monolithです。
+Control Planeからarbitrary shell commandを受け取りません。
 
-### Operator clients
+## Communication model
 
-`mcserverctl`、Discord Bot、local automationはControl PlaneのOperator API clientです。
-
-```text
-mcserverctl ───────┐
-Discord Bot ───────┼─ JSON-RPC over Unix domain socket ─▶ Control Plane
-local automation ──┘
-```
-
-最初は同じUnix socketと同じControl Plane権限を使用します。Discord userごとのauthorizationはBot側で行い、Bot process自体はtrusted full-control clientとして扱います。
-
-## Domain dependency
-
-Control PlaneとNode Agentは同じdomain languageを共有しますが、内部構造を完全に鏡写しにはしません。
+AgentはControl PlaneへJSON-RPC 2.0 requestを送ります。Control PlaneからNodeへの直接inbound connectionはありません。
 
 ```text
-Minecraft Server lifecycle
-    ├─ uses Minecraft Server operations
-    ├─ uses Server Data operations
-    ├─ uses Workload operations
-    └─ uses Node lifecycle
-
-Workload
-    └─ requires a Ready Node
-
-Server Data
-    └─ requires a Node-side execution location and filesystem access
-
-Node
-    ├─ uses Node Agent Node capability
-    └─ uses Akamai Compute Adapter
+Agent ── agent.sync request ──> Control Plane
+Agent <─ commands in result ─── Control Plane
 ```
 
-Dependencyは一方向です。
+HTTP/2 connectionを再利用し、long pollによってidle時のrequest頻度を抑えます。Control Planeは同じcommandを再配送でき、Agentは`operation_id`と`stage`をkeyに重複実行を吸収します。
 
-- NodeはMinecraftを知りません。
-- WorkloadはMinecraftのsave semanticsを知りません。
-- Server DataはMinecraft file contentsを解釈しません。
-- Minecraft ServerはAkamai API、Podman command、restic commandを直接呼びません。
+## Desired state and reconciliation
 
-## Example: starting a Minecraft Server
-
-OperatorがMinecraft Serverを`Running`にすると、Control Planeは一回の巨大transactionではなく、durable stateとobservationを使って段階的に収束させます。
+MinecraftServer Spec変更ごとに`generation`が増えます。Controllerはdesired generationとAgentが報告した`applied_generation`を比較します。
 
 ```text
-1. MinecraftServer desired state = Running
-2. 実行可能なNodeを確保する
-3. Node Agentがauthenticatedでfreshであることを確認する
-4. Server Dataを指定Snapshotからrestoreする
-5. Workload definitionをNodeへ適用する
-6. Minecraft Server processを起動する
-7. Minecraft application readinessを確認する
-8. MinecraftServer StatusをReadyへ導出する
+desired Spec
+  + durable Operation
+  + fresh Observation
+  → one bounded reconciliation
+  → next stage or retry time
 ```
 
-各stepはrestart後に再評価できます。途中のrequest responseが失われても、外部stateを観測して何が起きたかを確定します。
+一回のreconciliationは長時間待ちません。外部処理を開始したらOperationを保存して終了し、後続syncまたはtimerで再評価します。
 
-## Example: stopping and protecting data
+## Starting a Minecraft Server
 
 ```text
-1. MinecraftServer desired state = Stopped
-2. 必要に応じて新規接続を抑止する
-3. Minecraft固有のsaveを要求する
-4. save completionを確認する
-5. graceful stopを要求する
-6. process停止を観測する
-7. Server Data backupを実行する
-8. Snapshotと必要なverificationを確認する
-9. policyが許す場合にNodeをreleaseする
+1. desired_state = Running
+2. active Operationを作成または再開
+3. Nodeを選択またはprovision
+4. Agent availabilityを待つ
+5. Server HomeがなければSnapshotからrestore、初回なら作成
+6. desired Specをmanifestへmaterialize
+7. Quadlet/systemdへruntimeを適用
+8. itzg containerを起動
+9. healthcheckとRCON readinessを確認
+10. Ready conditionをTrueにする
 ```
 
-`save requestを送った`、`restic commandが終了した`、`Cloud APIがdeleteを受理した`という単一responseだけで次の破壊的stepへ進みません。
+## Stopping and backing up
 
-## State and sources of truth
+```text
+1. desired_state = Stopped
+2. RCONまたはcontainer lifecycleでgraceful stop
+3. process停止を観測
+4. Server Home全体へrestic backup
+5. restic exit code 0とSnapshot IDをresultとして保存
+6. policyがOnDemandならNode release
+```
 
-| State | Meaning | Owner/source |
-| --- | --- | --- |
-| Desired state | Operatorまたは上位domainが要求した状態 | Control Plane database |
-| Durable application state | Operation、Incident、mutation intentなど | Control Plane database |
-| Observation | external systemから取得したtimestamp付き事実 | Akamai、Node Agent、systemd、restic、Minecraft process |
-| Status | desired state、durable state、fresh Observationから導出した現在状態 | Control Plane controller |
+running中のmanualまたはscheduled backupでは、RCONでsaveをquiesceし、`save-on`を必ず復帰させてからresultを確定します。
 
-Control Plane databaseはexternal systemの代替truthではありません。たとえばCompute Instanceの存在はAkamai inventory、Snapshotの存在はrestic repository、Minecraft readinessはMinecraft processの観測で確認します。
+## Replacement recovery
 
-## Failure and recovery model
+Nodeを失った場合、last successful Snapshotがあれば新しいNodeへServer Homeをrestoreし、同じMinecraftServer Spec generationを適用します。古いNodeが後から復帰しても、allocationごとの`fencing_token`が古いcommandを拒否します。
 
-Systemはnetwork、process、providerが失敗することを通常条件として設計します。
+## Sources of truth
 
-- Controllerはlevel-triggeredであり、eventを失ってもstateを再観測できます。
-- Control Plane restart後はdatabaseからoperationを再開し、memory上のAgent sessionを有効とはみなしません。
-- Node Agentはconnection loss後にjitter付きexponential backoffで再接続します。
-- mutation response timeoutは「失敗」ではなく「結果不明」として扱います。
-- identity、ownership、external stateが矛盾する場合はIncidentを作り、影響範囲のmutationを停止します。
-- provider上のAbsentを確認するまでNode resourceをfinalizeしません。
+| Information | Source of truth |
+| --- | --- |
+| desired Minecraft configuration | Control Plane database |
+| active Operationとstage | Control Plane database |
+| local command result | Agent operation journal |
+| Compute Instance existence | Akamai API |
+| local runtime state | systemd、Podman、RCON observation |
+| backup resultとSnapshot ID | successful restic command result |
+| Snapshot data | restic repository on R2 |
 
-詳細は[State and reconciliation](architecture/state-and-reconciliation.md)と[Failure model](architecture/failure-model.md)を参照してください。
-
-## Initial deployment profile
-
-最初のdeploymentでは次を使用します。
-
-- Control Plane: OCI Compute上の一つの`mcserver-control-plane`
-- managed Node: Akamai Cloud Compute Instance
-- Node OS: Debian 13 GNU/Linuxをinitial targetとする
-- Workload Runtime: Podman、Quadlet、systemd
-- Server Data: restic repository on Cloudflare R2
-- Agent communication: QUIC、TLS 1.3、mTLS、JSON-RPC
-- Operator communication: JSON-RPC over Unix domain socket
-
-これはinitial implementation profileであり、generic multi-cloud platformやgeneral-purpose orchestratorを約束するものではありません。
+Control Plane databaseは外部systemの状態を推測して置き換えません。ただし、resticやR2の内部整合性を独自に再検証することもしません。

@@ -18,9 +18,9 @@ Contributorがこのsystemや過去の議論を知っていることは前提に
 - current designを自己完結かつ簡潔に保つ
 - repository外の会話や旧implementationを前提にしない
 - speculative generalizationを追加しない
-- external mutationの曖昧さを隠さない
+- retry可能なfailure、unknown outcome、unsafe contradictionを区別する
 - desired stateとobserved stateを区別する
-- domain boundaryを越えてdatabase tableやexternal adapterを直接操作しない
+- MinecraftServer、Node、Server Home、Operationのownershipを越えてdatabase tableやexternal adapterを直接操作しない
 - stable release前のprototype compatibilityより、現在の安全で単純な設計を優先する
 - 設計変更ではcurrent documentと必要なADRを同時に更新する
 

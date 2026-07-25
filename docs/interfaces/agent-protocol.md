@@ -1,161 +1,201 @@
-# Agent Protocol
+# Agent API
 
 ## Purpose
 
-Control PlaneとNode Agentの間で、authenticatedなtyped request/response、notification、observationを交換します。
+Node AgentがControl PlaneへauthenticatedなObservationとOperation updateを送り、実行すべきtyped Commandを受け取ります。
 
 ## Layering
 
 ```text
-Domain RPC methods
-  → JSON-RPC 2.0 project profile
-  → length-prefixed UTF-8 JSON frame
-  → QUIC stream
-  → QUIC v1 / TLS 1.3
-  → UDP 443
+Agent methods and DTO
+  → JSON-RPC 2.0
+  → HTTP request/response
+  → HTTP/2
+  → TLS
+  → TCP 443
 ```
 
-HTTP/3は使用しません。
+独自length framing、raw QUIC、HTTP/3、WebSocket、server pushはv1で使用しません。
 
-## Endpoint and connection
+## Direction
 
-- Node Agentがstable DNS endpointへoutbound接続する
-- Control Plane server certificateはendpointのDNS SANを持つ
-- enrollment後はmTLSを要求する
-- 一つのactive Agent sessionにつき一つのlong-lived QUIC connection
-- AgentとControl Planeの双方がbidirectional streamを開始できる
-- remote IP/portはNode identityではない
-- validated connection migration/NAT rebindingをidentity changeとして扱わない
-- 0-RTT application dataを使用しない
-
-## Stream mapping
-
-### Request/response
-
-一つのbidirectional streamに一つのrequestと一つのresponseを対応させます。
+すべてのnetwork requestはNode Agentが開始します。
 
 ```text
-request initiator  ── request + FIN ──> receiver
-request initiator  <─ response + FIN ── receiver
+Node Agent ── JSON-RPC request ──> Control Plane
+Node Agent <─ JSON-RPC result ──── Control Plane
 ```
 
-streamを再利用しません。
+Control PlaneからNodeへinbound connectionを作りません。CommandはAgent Sync resultに含めます。
 
-### Notification
+## HTTP contract
 
-許可されたnotificationは、一つのunidirectional streamへ一件だけ送ります。initial notificationは`agent.heartbeat`です。
+- endpointはstable DNS name上のHTTPS
+- application endpointは`POST /agent/v1/rpc`
+- HTTP/2をALPN `h2`で要求する
+- connectionを再利用する
+- `content-type: application/json`
+- request bodyは一つのJSON-RPC object
+- JSON-RPC batchは使用しない
+- HTTP statusはtransport/authentication levelへ使い、domain errorはJSON-RPC errorへ返す
+- body、header、deadline、concurrent streamにfinite limitを持つ
 
-QUIC DATAGRAMは初期実装で使用しません。reliable streamと同じframing/parserを使用し、loss handlingの種類を増やさないためです。
+## Authentication
 
-## Framing
+### Enrollment
 
-各stream方向のframe:
+`agent.enroll`だけはone-time Enrollment Tokenを使用します。server TLS identityは必須です。
+
+### Enrolled Agent
+
+通常methodは次を要求します。
 
 ```text
-u32 big-endian payload length
-UTF-8 JSON bytes
-FIN
+Authorization: Bearer <agent-credential>
 ```
 
-次をprotocol violationとして扱います。
-
-- declared lengthより短いpayload
-- size limit超過
-- payload後のtrailing data
-- 一方向に複数message
-- invalid UTF-8またはBOM
-- duplicate JSON member
-- top-level array/scalar
-- JSON-RPC batch
-
-有限payload limit、stream limit、connection flow-control、handler concurrency、deadlineを必須とします。exact defaultはimplementation planでbenchmark前提のinitial valueとして定めます。
+Control Planeはcredential digest、Node ID、active authorizationを検証します。Node IDはrequest paramsだけで信頼せず、credential bindingと一致させます。
 
 ## JSON-RPC profile
 
 - `jsonrpc`は`"2.0"`
-- request IDはcanonical lowercase UUIDv7 stringとし、number/null IDを禁止する
+- request IDはcanonical lowercase UUID string
 - `params`はobject
 - methodはlowercase namespaced string
+- unknown fieldはschema validation error
+- batchとnotificationはv1で使用しない
 - `result`と`error`は排他的
-- notificationは明示allowlistだけ
-- unknown methodはstandard JSON-RPC errorへmapping
-- application errorはstableな`data.kind`と`retryable`を持つ
+- stable application errorは`error.data.kind`を持つ
+- JSON-RPC IDはidempotency keyではない
 
-## Method families
+## Methods
 
-Agent core:
+### `agent.enroll`
 
-```text
-agent.enroll
-agent.heartbeat
-agent.report
-agent.certificate.rotate
+one-time tokenをAgent Credentialへ交換します。詳細は[Agent enrollment](agent-enrollment.md)を参照してください。
+
+### `agent.sync`
+
+Agentの通常loopで使用する中心methodです。
+
+request concept:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<uuid>",
+  "method": "agent.sync",
+  "params": {
+    "node_id": "node-01",
+    "session_id": "<uuid>",
+    "sequence": 42,
+    "agent_version": "...",
+    "capabilities": {},
+    "observations": [],
+    "operation_updates": []
+  }
+}
 ```
 
-Domain capability:
+result concept:
 
-```text
-node.*
-workload.*
-server_data.*
-minecraft.*
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<same-uuid>",
+  "result": {
+    "accepted_sequence": 42,
+    "server_time": "...",
+    "commands": [],
+    "next_sync_after_ms": 1000
+  }
+}
 ```
 
-Minecraft公式protocolやRCON commandをこのwire contractへ直接露出させません。
+exact schemaはprotocol crateでversioned DTOとして定義します。
 
-## Heartbeat and report
+## Long polling
 
-### Heartbeat
+Commandがない場合、Control Planeは`agent.sync`をinitial default 20秒までholdできます。Agentはdeadlineを少し長く設定します。
 
-- JSON-RPC notification
-- Agent-initiated unidirectional stream
-- `session_id`とmonotonic `sequence`
-- Node identityはmTLS connection contextから取得
-- freshnessはControl Plane受信時刻で判定
-- heartbeat一件ごとにdatabaseへwriteしない
+HTTP/2 connection上では、operation completionなどurgentなupdateを別streamの`agent.sync`で送信できます。ただし同一Sessionの`sequence`で重複と順序を処理します。
 
-### Full report
+long poll timeoutは正常resultでありerrorにしません。
 
-request/responseとして、次の場合に送ります。
+## Command schema
 
-- active connection確立直後
-- boot/process/capability/health変更
-- Control Planeからの要求
-- periodic refresh
+CommandはControl PlaneがAgentへ割り当てるOperation Stageです。
 
-reportはheartbeatより低頻度です。
-
-## Reconnect
-
-unexpected connection loss後、Node Agentは自律的に再接続します。
-
-initial nominal schedule:
-
-```text
-1, 2, 4, 8, 16, 32, 60, 60... seconds
+```json
+{
+  "operation_id": "<uuid>",
+  "stage": "apply_generation",
+  "kind": "server.runtime.apply",
+  "minecraft_server_id": "survival",
+  "spec_generation": 12,
+  "fencing_token": 19,
+  "deadline": "...",
+  "params": {}
+}
 ```
 
-actual delayには50–100%程度のjitterを加えます。mTLS connectionとinitial report successの両方を確認した場合だけbackoffをresetします。
+Command kindはtyped allowlistです。shell command、Podman argument list、restic argument list、raw RCON commandを含めません。
 
-## Session replacement
+## Delivery and idempotency
 
-同じNode identityの新sessionをacceptした場合、旧sessionを明示的にcloseし、旧connection由来のheartbeat/reportをactive stateへ反映しません。
+- Control Planeはterminal updateを受け取るまで同じCommandを再配送できる
+- Agent journal keyは`operation_id + stage`
+- journalにはpayload hash、state、started_at、completed_at、resultを保存する
+- same keyとsame hashなら既存state/resultを返す
+- same keyとdifferent hashなら`command_conflict`
+- old Fencing Tokenなら`stale_allocation`
+- response lossは未実行を意味しない
 
-## Delivery semantics
+## Operation updates
 
-- response未受信はmethod未実行を意味しない
-- stream resetはoperation rollbackを意味しない
-- JSON-RPC IDはcorrelationでありidempotency keyではない
-- mutation methodはdurable Operation IDまたはmethod固有idempotency identityを使用する
-- orderingはdomain sequence/generationで表し、stream arrival orderへ依存しない
-
-## Protocol versioning
-
-ALPNでincompatible wire protocolを分けます。
+Agentは次を報告します。
 
 ```text
-mcserver-enroll/1
-mcserver-agent/1
+Accepted
+Running
+Succeeded
+Failed
+Rejected
 ```
 
-method-level capabilityとschema versionはinitial report/capability exchangeで扱います。最初のstable protocol contractまでは、旧wire identifierやschemaとのcompatibilityを保証しません。
+terminal resultはAgent journalへ先に保存してからsyncします。Control Planeが受信をacknowledgeするまで、Agentは再送できます。
+
+## Observation
+
+Agent Syncは必要なcurrent factを送ります。
+
+- boot ID、Agent uptime、OS
+- Server Home existenceとmanifest generation
+- systemd unit state
+- container state、image digest、health
+- RCON readiness、player count
+- active local Fencing Token
+
+heartbeat専用notificationを別protocolとして持たず、fresh Agent Sync受信時刻をlivenessに使用します。
+
+## Session and reconnect
+
+Agent process起動ごとにnew Session IDを作ります。同じNodeのnew Sessionを受理した場合、old Sessionから遅れて届いたsequenceをcurrent stateへ反映しません。
+
+reconnect initial schedule:
+
+```text
+1s, 2s, 4s, 8s, 16s, 30s, 60s, 60s ...
+```
+
+jitterを加え、successful authenticated sync後にbackoffをresetします。authentication rejectionはnetwork failureと同じ高速retryを行いません。
+
+## Versioning
+
+HTTP pathのmajor versionとDTO schema versionでincompatible changeを分けます。
+
+```text
+/agent/v1/rpc
+```
+
+stable release前はold schemaとのcompatibilityを保証しません。Agent SyncにはAgent versionとcapabilityを含め、unsupported Commandを割り当てません。

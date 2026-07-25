@@ -1,20 +1,17 @@
 # ADR-0004: Treat external mutation timeouts as uncertain
 
-Status: Accepted
+Status: Superseded by ADR-0013
 
 ## Context
 
-network responseの喪失はexternal operationの非実行を意味しない。blind retryはduplicate resource、data corruption、誤削除を起こし得る。
+network response lossはexternal operationの非実行を意味せず、blind retryはduplicate effectを起こし得ます。
 
-## Decision
+## Original decision
 
-request送信後のtimeout、disconnect、malformed success responseを、成功でも失敗でもなくuncertainとして扱う。同じmutationをblind retryせずread-only observationで確定する。
+mutation response lossをuncertainとして分類し、read-only observationで確定できない場合はIncidentへ移行する方針を採用しました。
 
-## Consequences
+## Supersession
 
-mutation前のdurable intent、ownership/discovery identity、bounded observation、Incident modelが必要になる。自動進行より安全停止を優先する。
+この判断はuncertaintyを正しく認識しましたが、通常failureまでIncidentへ近づけ、operation-specific recoveryを弱くしました。
 
-## Related documents
-
-- [Design principles](../design-principles.md)
-- [Architecture overview](../architecture/overview.md)
+[ADR-0013](0013-use-durable-operations-and-idempotent-agent-commands.md)は、Unknown Outcomeをdurable Operation、idempotent replay、observationで自動収束させ、Incidentをunsafe contradictionに限定します。

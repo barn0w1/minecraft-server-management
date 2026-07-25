@@ -2,65 +2,125 @@
 
 ## Purpose
 
-Minecraft固有のdesired lifecycle、configuration、application state、safe operationを管理します。
+Minecraft固有のdesired lifecycle、itzg configuration、application readiness、save、stop、player observation、automation policyを管理します。
 
 ## Owned concepts
 
 - `MinecraftServer`
 - `MinecraftServerSpec`
 - `MinecraftServerStatus`
-- `MinecraftServerOperation`
-- server version and distribution
-- application readiness
-- player/world/server stateの必要なsubset
+- `Generation`
+- `Server Runtime`
+- Minecraft-specific Condition and Event
 
-## Responsibilities
+`Operation`、`Node`、`Server Home`、`Snapshot`は別moduleが所有しますが、MinecraftServer controllerがlifecycleを協調させます。
 
-- Minecraft version、distribution、Java/runtime requirementの解釈
-- server properties、mod/plugin inputなどのWorkload specへの変換
-- application readinessの判定
-- save、graceful stop、必要なserver-specific command
-- Minecraft Server Management Protocol、RCON、server software固有integrationのcapability解釈
-- local eventとobservationのdomain modelへの正規化
+## Spec
 
-このdomainはMinecraftの仕様、command、internal ruleを深く知ってよい唯一の主要domainです。
+initial Specは次のcategoryを持ちます。
 
-## Control Plane and Node Agent split
+```yaml
+metadata:
+  id: survival
 
-Control Plane:
+spec:
+  desiredState: Running
 
-- desired stateとoperation orderingを決める
-- save/stop/backup/releaseのpolicyを所有する
-- durable operationとresultを追跡する
+  minecraft:
+    type: PAPER
+    version: "<explicit-version>"
+    eulaAccepted: true
 
-Node Agent:
+  runtime:
+    image: docker.io/itzg/minecraft-server:<explicit-reference>
+    memory: 6Gi
+    gamePort: 25565
+    environment: {}
 
-- local control adapterを選ぶ
-- Management Protocol/RCONへ接続する
-- typed project operationをlocal protocol commandへ変換する
-- local timeout、capability、process stateを観測する
+  nodePolicy:
+    mode: OnDemand
+    provider: Akamai
+    region: <region-id>
+    type: <type-id>
 
-## Adapter preference
+  backupPolicy:
+    backupBeforeNodeRelease: true
+    schedule: null
 
-initial preference:
+  automation:
+    stopWhenEmptyFor: null
+```
 
-1. Minecraft Server Management Protocol
-2. server distribution固有のstructured integration
-3. RCON
-4. systemd/process-level graceful stop fallback
+exact schemaはimplementationとともにversioned DTOとして定義します。重要なinvariantは次です。
 
-Control Plane protocolへofficial method名やRCON文字列をそのまま露出させません。
+- `TYPE`と`VERSION`を明示する
+- `EULA=TRUE`はOperatorのexplicit acceptanceを要求する
+- Minecraft-specific environmentだけをallowlistまたはvalidationする
+- arbitrary container command、privileged flag、host path mountをOperator Specへ公開しない
+
+## itzg runtime contract
+
+v1の唯一のruntime implementationはitzg/minecraft-serverです。
+
+Node AgentはSpecから次をmaterializeします。
+
+- container image reference
+- itzg environment variables
+- `Server Home/data`から`/data`へのmount
+- `RCON_PASSWORD_FILE`
+- game port mapping
+- memory/resource settings
+- healthcheck
+- Quadlet unit
+
+applied manifestにはdesired generation、image reference、resolved image digest、effective environment、port、resource settingを記録します。
+
+## Runtime configuration and Server Home
+
+Runtime configurationはControl Plane databaseだけに閉じ込めません。Node Agentはeffective configurationを`Server Home/manifest.json`へ書き、Server Home backupへ含めます。
+
+これにより各Snapshotは、dataとその時点の起動設定を一緒に保持します。
+
+Control Planeが存在する通常運用ではSpecがcurrent authorityです。Snapshotからのdisaster recoveryではmanifestをrecovery inputとして利用できます。
+
+## Readiness
+
+`RuntimeReady=True`には少なくとも次を要求します。
+
+- desired generationがmanifestへ適用済み
+- systemd unitがactive
+- Podman containerがrunning
+- container healthcheckがhealthy
+- local RCON queryが成功
+
+`MinecraftServer Ready=True`には、さらにactive Node allocationがcurrent Fencing Tokenで有効であることを要求します。
+
+## Minecraft control
+
+v1はRCONを使用します。
+
+project operation:
 
 ```text
-project operation: minecraft.save
-  → Node Agent adapter
-  → Management Protocol method or RCON command
+minecraft.observe
+minecraft.players.get
+minecraft.save.prepare
+minecraft.save.resume
+minecraft.stop
 ```
+
+Control PlaneはRCON command stringを送らず、Node Agent adapterがtyped operationを具体的commandへ変換します。
+
+## Update
+
+Spec変更でGenerationが増えます。Controllerはcurrent Server Homeを維持したままnew generationをapplyします。
+
+Minecraft versionやTYPE変更などdata migrationを伴い得るupdateでは、policyによりpre-update backupを作成できます。automatic rollbackはcontainer configurationだけに限定せず、必要ならSnapshot restoreを明示Operationとして行います。
 
 ## Non-responsibilities
 
-- Akamai API
-- restic repository implementation
-- Podman command construction
-- filesystem backup retention
-- Node identity enrollment
+- Akamai HTTP API
+- restic command construction
+- generic container scheduling
+- Minecraft以外のprogram execution
+- arbitrary RCON console proxy

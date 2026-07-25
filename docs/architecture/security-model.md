@@ -1,17 +1,19 @@
 # Security model
 
+Security modelはsmall-community deploymentで必要なboundaryを明確にし、private PKIや複雑なcertificate lifecycleをv1の必須要件にしません。
+
 ## Security goals
 
-- Control PlaneとNode Agentが相互に正しいdeployment/node identityを検証する
+- Operator APIをtrusted local clientへ限定する
+- Agentが正しいNode identityとして認証される
+- stale NodeのCommand実行をFencing Tokenで拒否する
 - managed resource以外を誤って変更しない
-- Operator APIをlocal trusted clientへ限定する
-- credentialとprivate keyをdatabase、log、Gitへ漏らさない
-- Node削除後に古いAgent credentialで操作できない
-- break-glass accessをnormal lifecycleから分離する
+- arbitrary remote shellとpublic RCONを提供しない
+- credentialをGit、database、normal logへ残さない
 
 ## Operator boundary
 
-Operator APIはUnix domain socketで公開し、filesystem permissionとOS peer identityをaccess boundaryとします。初期構成ではTLSを使用しません。
+Operator APIはUnix domain socketで公開します。
 
 ```text
 /run/mcserver/control-plane.sock
@@ -20,60 +22,64 @@ group: mcserver-operators
 mode: 0660
 ```
 
-Discord Botはこのsocketへaccessできるtrusted processです。Discord側permissionはBotが実施します。
+socket accessを持つclientはfull-control Operatorです。Discord userごとのauthorizationはBot側で行います。
 
-## Agent transport identity
+## Agent transport
 
-- Control Plane server certificateはAgent endpointのDNS SANと`serverAuth`を持つ
-- enrollment後のNode Agent certificateはNode identityを表すURI SANと`clientAuth`を持つ
-- certificate chainだけでなく、database上のactive Node authorizationと一致することを要求する
-- exact URI encodingはimplementation開始前にinterface contractでcanonicalに固定する
-- SPIFFEを正式採用しない限り、SPIFFE IDを装わない
+- Agent APIはstable DNS name上のHTTPS endpoint
+- HTTP/2をALPN `h2`でnegotiateする
+- server identityはpublicまたはdeployment-trusted TLS certificateで検証する
+- enrollment後はper-Node Agent Credentialを`Authorization` headerで送る
+- Control Planeはcredential digestとactive Node authorizationを検証する
+- credentialだけでなくNode ID、Session ID、Fencing Tokenもprotocolで検証する
 
-## Private PKI
-
-推奨hierarchy:
-
-```text
-Offline Root CA
-  ├─ Server Issuing Intermediate
-  │    └─ Control Plane server leaf
-  └─ Node Agent Issuing Intermediate
-       └─ short-lived Node Agent leaf
-```
-
-Root CA private keyはrunning Control Plane、managed Node、database、Git、R2、通常backupへ置きません。offline operator environmentまたは暗号化removable mediaで保管します。
-
-Control PlaneはNode Agent certificateを自動更新するためのonline issuing materialを持ち得ます。server certificate issuerとAgent issuerのkey/profileを分離します。
+v1ではclient certificate、offline Root CA、CRL、OCSPを要求しません。必要性が実測された場合にmTLSを追加できます。
 
 ## Enrollment
 
-- Node identityはCompute Instance作成前にControl Planeが発行する
-- bootstrapへDeployment trust anchor、Node ID、endpoint、one-time tokenを渡す
-- Node Agentは自身でprivate keyを生成し、CSRを送る
-- one-time tokenはdigestだけをdatabaseへ保存し、atomicに一回だけconsumeする
-- enrollment後は新しいmTLS connectionへ切り替える
-- silent automatic re-enrollmentは行わない
+- Control PlaneはNode IDとone-time Enrollment Tokenを発行する
+- tokenはrandom、finite TTL、single use
+- databaseにはtoken digestだけを保存する
+- successful enrollmentでper-Node Agent Credentialを返す
+- Agentはcredentialをroot-only fileへ保存する
+- Node deleteまたはreplacement時にcredentialをdisableする
 
 詳細は[`interfaces/agent-enrollment.md`](../interfaces/agent-enrollment.md)を参照してください。
 
 ## Provider ownership
 
-Akamai resourceにはDeployment IDとNode IDへ対応するmachine-readable ownership tagを付けます。labelやIP addressだけで所有権を判断しません。mutation前とfinalization前にownershipを再検証します。
+Akamai resourceにはDeployment ID、Node ID、provision Operation IDを表すmachine-readable metadataを付けます。labelやIP addressだけでownershipを判断しません。
 
-## Secrets
+Delete前にはstored Compute Instance IDとownership metadataを再確認します。
 
-- Akamai credential、R2 credential、issuing keyはdaemon-readable secret fileまたは専用secret storeから読み込む
-- restic repository passwordはempty passwordとし、password secret、password file、password environment variableを作成しない
-- empty restic passwordはconfidentiality boundaryではない。R2 credentialとbucket/prefix access controlをrepository dataの主要boundaryとする
-- command-line argument、environment dump、structured log、databaseへplaintext secretを残さない
-- Node Agentへ必要なcredentialだけをscope限定して渡す
-- evidenceとaudit recordはredaction済みとする
+## Server Runtime security
+
+- RCONはNode local endpointだけにbindする
+- RCON passwordはServer Homeのroot-only `secrets/rcon-password`へ保存する
+- itzg runtimeには`RCON_PASSWORD_FILE`として渡す
+- Control Planeはarbitrary RCON stringを通常APIとして公開しない
+- container image referenceとapplied digestをStatusへ記録する
+- Agentはarbitrary shell Commandを受け付けない
+
+## Backup credentials
+
+すべてのrestic repositoryは一つのDeployment Restic Passwordを共有します。
+
+- passwordはOperatorが明示的に設定する
+- Control Plane databaseには保存しない
+- canonical fileは`/etc/mcserver/secrets/restic-password`
+- database lossだけでpasswordを失わない
+- disaster recovery時に同じpasswordを再配置できるよう、Operatorがdeployment configurationとして別途保管する
+- plaintextをlog、CLI argument、Gitへ出さない
+
+R2 credentialは必要なscopeだけをNode Agentへ提供します。exact delivery mechanismはBackup milestoneで実装contractとして確定します。
+
+## Trust assumptions
+
+- managed Nodeのroot compromiseは、そのNodeへ渡されたserver-local secretとbackup credentialのcompromiseを意味する
+- R2 object read権限とDeployment Restic Passwordの両方を得た主体はSnapshotを復号できる
+- v1はmalicious Control Planeまたはmalicious root Nodeから防御しない
 
 ## Break-glass SSH
 
-break-glass SSHはpublic-key-only、operator CIDR制限、normal automation非依存とします。利用はIncident responseとしてauditし、通常のNode readiness条件に含めません。
-
-## Revocation model
-
-初期実装ではCRL/OCSPへ依存せず、short-lived Agent certificate、server-side active Node authorization、rotation停止、active connection切断を組み合わせます。Node deletion開始時にauthorizationを無効化し、certificateが期限内でも新規sessionを拒否します。
+break-glass SSHはpublic-key-onlyとし、normal lifecycleやreadinessから独立させます。利用はOperator Eventとして記録します。

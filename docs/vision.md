@@ -2,51 +2,53 @@
 
 ## Purpose
 
-Minecraft Server Management Systemは、小規模なcommunityが自分たちのMinecraft serverを便利に、安全に、堅固に運用するためのself-hosted management systemです。
+Minecraft Server Management Systemは、小規模なcommunityがMinecraft Java serverを**日常的に迷わず運用できるself-hosted automation system**です。
 
-operatorがserverごとのinfrastructure、process、persistent data、Minecraft固有operationを個別のmanual procedureとして扱うのではなく、一つのdesired lifecycleとして操作できることを目指します。
+Operatorは次だけを表現します。
+
+- どのMinecraft Serverを動かしたいか
+- どのversion、distribution、設定で動かしたいか
+- いつ停止、backup、restore、updateしたいか
+- Nodeを常時維持するか、必要時に作るか
+
+SystemはNode provisioning、Server Home restore、itzg runtime適用、readiness、graceful stop、backup、Node releaseを自動的に協調させます。
+
+## Product goal
 
 ```text
-MinecraftServer desired state
-        ↓
-Nodeの確保
-        ↓
-Server Dataのrestore
-        ↓
-Workloadの起動
-        ↓
-Minecraft application readiness
+Operator intent
+  → durable Operation
+  → automatic reconciliation
+  → observable result
 ```
 
-停止時には逆向きに、安全なsave、graceful stop、backup、snapshot verification、Node releaseをorchestrateします。
+通常のnetwork failure、process restart、Agent reconnect、provider一時障害は、人間が毎回介入しなくても回復するべきです。一方、誤ったresource削除につながるidentity contradictionなど、systemが安全な選択をできない場合だけOperatorへ判断を求めます。
 
-## Intended users
+## Priorities
 
-- 自分たちのMinecraft serverを管理する少人数のoperator
-- 一つまたは少数のcommunity
-- 基本的に一つのControl Plane deployment
-- infrastructureとdataを自分たちで所有するself-hosted運用
+1. 日常操作が簡単であること
+2. 通常の一時障害から自動回復すること
+3. Nodeを失ってもServer Homeを復元できること
+4. 何を実行中で、なぜ待っているか説明できること
+5. 破壊的な操作を明示的な条件で制御すること
+6. 実際の用途以上に一般化しないこと
 
-## Values
-
-優先順位は次です。
-
-1. dataを失わないこと
-2. 誤ったresourceを変更・削除しないこと
-3. 不明な状態を成功として扱わないこと
-4. process restartや一時的なnetwork failureから再収束できること
-5. operatorが現在状態と停止理由を説明できること
-6. 日常運用が簡単であること
-7. 実際の必要性に応じて拡張できること
-
-小規模であることは、identity、ownership、durability、failure safetyを省略する理由にはしません。一方で、enterprise向けの一般性や無制限な拡張性のためにsystemを複雑化しません。
+完全なfailure proof、enterprise-grade security、すべてのexternal inconsistencyの独自検証は目的ではありません。restic、Cloudflare R2、systemd、Podman、itzg/minecraft-serverなど、採用したsoftwareのdocumented contractを信頼し、その上に必要なautomationだけを構築します。
 
 ## Core idea
 
 ```text
+Minecraft Serverが主役
+Server Homeは復元可能
 Nodeは交換可能
-Server Dataは永続
-Minecraft Server lifecycleが両者を協調させる
+Operationが処理を追跡する
 ```
 
-Cloud VMの存在をMinecraft serverそのものとはみなしません。logical identity、workload、persistent data、application stateを分離して管理します。
+Cloud VM、container、Java processをMinecraft Serverそのものとはみなしません。logical server identityはControl Planeが所有し、実行場所は必要に応じて交換できます。
+
+## Intended users
+
+- 一つまたは少数のMinecraft community
+- 少人数のtrusted Operator
+- 一つのControl Plane deployment
+- infrastructureとbackup storageを自分たちで所有するself-hosted運用

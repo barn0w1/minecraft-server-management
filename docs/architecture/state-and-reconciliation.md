@@ -2,81 +2,128 @@
 
 ## State categories
 
-### Desired state
+### Spec
 
-Operatorまたは上位domainが要求する状態です。例: `MinecraftServer.spec.desired_state = Running`。
+Operatorまたはautomation policyが要求するdesired configurationです。Spec変更ごとに`generation`が増えます。
 
-### Durable application state
+### Durable execution state
 
-identity、spec、operation intent、Incident、最後に受理したreportなど、process restart後も必要なstateです。
+Operation、stage、attempt、deadline、next retry、allocation、Fencing Tokenなど、process restart後も必要なstateです。
 
 ### Observation
 
-external systemから得たtimestamp付きの事実です。例: Compute Instance status、Node Agent report、systemd unit state、restic Snapshot、Minecraft readiness。
+Akamai、Agent、systemd、Podman、RCON、resticから得たtimestamp付き事実です。
 
-### Derived status
+### Status
 
-desired state、durable state、fresh observationからControllerが導出する状態です。外部truthそのものではありません。
+Spec、Operation、fresh Observationから導出するcurrent summaryです。Statusは外部systemの代替truthではありません。
+
+## Operation model
+
+Operationは次のphaseを持ちます。
+
+```text
+Pending → Running → Waiting → Running → Succeeded
+                    │                    └→ Failed
+                    └────────────────────→ Canceled
+```
+
+- `Pending`: 実行可能になるのを待つ
+- `Running`: provider callまたはAgent Stageを実行中
+- `Waiting`: dependency、retry time、observation、Agent reconnectを待つ
+- terminal phase: `Succeeded`、`Failed`、`Canceled`
+
+Retryは新しいOperationを増やさず、同じOperationの`attempt`と`next_attempt_at`を更新します。
+
+## Operation Stage
+
+Operationはexplicitなstage machineを持ちます。例:
+
+```text
+server.stop
+  → request_graceful_stop
+  → wait_runtime_stopped
+  → backup_server_home
+  → release_node
+```
+
+Agent Commandのidempotency keyは`operation_id + stage`です。payload hashが一致する同じCommandは、Agent journal内の既存stateまたはresultを返します。payloadが違う場合はprotocol conflictです。
 
 ## Controller model
 
-Controllerは一回のreconciliationでboundedな処理だけを行います。
+一回のreconciliationはboundedです。
 
 ```text
-load resource and related durable state
-  → read fresh observation or schedule read
-  → validate identity and ownership
-  → derive current status
-  → persist at most one safe next intent/action
-  → return next evaluation time
+1. resource、active Operation、Observationを読む
+2. generation、allocation、Fencing Tokenを検証する
+3. current Conditionを導出する
+4. safe next actionを最大一つ決める
+5. transactionでstageまたはretry timeを保存する
+6. external callを行う場合はresultを保存して終了する
 ```
 
-process内event、timer、notificationはreconciliationを早めるhintであり、正しさの前提ではありません。
+長時間sleep、busy wait、一つのhandler内でのend-to-end workflow完走を行いません。
 
-## Mutation intent
+## Agent delivery semantics
 
-external mutation前に、少なくとも次をdurableにします。
+- Agent Sync responseを失ってもCommandが実行された可能性がある
+- Control Planeは同じCommandを再配送できる
+- Agentはlocal journalからRunningまたはterminal resultを返す
+- JSON-RPC request IDはcorrelationだけに使う
+- Operation IDとStageがeffect identityになる
+- Command arrival orderをbusiness orderingに使わない
 
-- target logical identity
-- external identityまたはdiscovery key
-- requested action
-- idempotency/correlation identity
-- generation
-- started timestamp
-- expected observation
+## Fencing
 
-mutation responseが失われても、restart後にread-only observationから結果を追跡できるようにします。
+MinecraftServerのactive allocationごとにmonotonic `fencing_token`を発行します。Agentは受理済みtokenより古いCommandを拒否します。
+
+```text
+old Node token 14
+new Node token 15
+
+old Nodeが復帰してtoken 14のCommandを受信
+  → stale_allocationとして拒否
+```
 
 ## Freshness
 
-Observationにはsourceと`observed_at`を持たせます。古いObservationだけで`Ready`を維持しません。freshness thresholdはdomain/interface documentのinitial defaultとして定義し、configuration可能にします。
+Observationは`observed_at`とsourceを持ちます。Agent liveness、runtime readiness、player countなどはdomainごとのfreshness thresholdを超えたらUnknownへ戻します。
+
+古いObservationだけで`Ready=True`を維持しません。
 
 ## Restart recovery
 
-- Control Plane restart後はmemory上のAgent sessionを無効とする
-- pending Operationとretry deadlineはdatabaseから再構築する
-- startup inventoryを完了するまでdestructive mutationを抑止できる設計にする
-- Node Agent restart後は新session IDとinitial reportを要求する
-- eventの再配送を必要としない
+### Control Plane restart
 
-## Finalization
+- active OperationをSQLiteからloadする
+- expired retryをscheduleする
+- Agent SessionをUnknownへ戻す
+- provider mutationをblind repeatせず、operation kindに応じてreadまたはretryする
 
-logical resourceを削除しただけでexternal resourceが消えたとみなしません。
+### Agent restart
 
-例: Node release
-
-```text
-Node desired lifecycle = Absent
-  → ownershipを再確認
-  → Compute Instance delete intent
-  → provider inventoryでAbsentを確認
-  → credential/authorizationを無効化
-  → final durable recordを確定
-```
+- 新しいSession IDを作る
+- local journalをloadする
+- local runtimeを観測する
+- unfinished commandとterminal resultを次のAgent Syncで報告する
 
 ## Concurrency
 
-- resource generationまたはversionでstale writeを拒否する
-- 一つのresourceに複数のmutation intentを同時に走らせない
-- separate QUIC stream間のarrival orderをdomain orderingに使用しない
-- JSON-RPC request IDをidempotency keyとみなさない
+- MinecraftServerごとにactive mutating Operationは最大一つ
+- Nodeごとにactive Allocationは最大一つ
+- AgentはMinecraftServerごとにmutating Stageをserializeする
+- Spec generationが変わった場合、古いOperationはcancelまたは新Specに不要なら収束終了する
+- optimistic concurrencyでstale database writeを拒否する
+
+## Conditions
+
+initial Condition set:
+
+- `Ready`
+- `Progressing`
+- `Degraded`
+- `NodeAvailable`
+- `RuntimeReady`
+- `BackupAvailable`
+
+Conditionは`status`、`reason`、`message`、`observed_generation`、`last_transition_time`を持ちます。

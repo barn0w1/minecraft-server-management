@@ -1,20 +1,22 @@
-# ADR-0009: Use Podman, Quadlet, and systemd for the Workload Runtime
+# ADR-0009: Use Podman, Quadlet, and systemd for the Server Runtime
 
 Status: Accepted
 
 ## Context
 
-managed NodeはGNU/Linuxであり、systemdのrestart、dependency、logging、boot integrationを利用できる。full container orchestratorを導入せずdeclarativeなunitを扱える。
+Minecraft Server processにはcontainer isolation、declarative configuration、boot integration、restart supervision、inspectable local stateが必要です。
 
 ## Decision
 
-initial Workload RuntimeはPodman containerをQuadlet definitionとして管理し、generated systemd serviceをsystemdでsuperviseする。
+Node上のServer RuntimeにPodmanを使用し、container definitionをQuadletとしてmaterializeし、systemdでlifecycleをsuperviseします。
+
+v1のcontainerはitzg/minecraft-serverだけです。generic Workload resourceやarbitrary container specificationは提供しません。
 
 ## Consequences
 
-Node AgentはQuadlet/systemd detailをtyped Workload operationへ隠蔽する。exact rootful/rootless model、directory、resource limitはWorkload milestoneで決定する。
+Node AgentはQuadlet file生成、atomic replacement、daemon reload、unit lifecycle、Podman/systemd observationをtyped adapterとして実装します。Control Planeへraw commandやunit contentを露出させません。
 
 ## Related documents
 
-- [Design principles](../design-principles.md)
-- [Architecture overview](../architecture/overview.md)
+- [Minecraft Server domain](../domains/minecraft-server.md)
+- [Module boundaries](../architecture/module-boundaries.md)

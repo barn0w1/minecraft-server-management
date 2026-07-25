@@ -1,77 +1,87 @@
 # Design principles
 
-この文書は、実装詳細より長く維持される判断基準を定義します。
+この文書は、implementation detailより長く維持する判断基準を定義します。
+
+## Minecraft Server is the primary aggregate
+
+Operatorが管理する中心は`MinecraftServer`です。Node、Server Home、runtime、backupはMinecraft Server lifecycleを実現するためのsubsystemです。
+
+Minecraft以外のprogramを実行するgeneric Workload abstractionは作りません。
+
+## Use established components as contracts
+
+restic、Cloudflare R2、systemd、Podman、itzg/minecraft-serverのdocumented behaviorを信頼します。systemはそれらの内部整合性検証を再実装しません。
+
+- restic backup exit code 0を成功とする
+- R2のdocumented storage consistencyを前提とする
+- systemdをprocess supervision authorityとして利用する
+- itzg/minecraft-serverを唯一のMinecraft runtime adapterとする
 
 ## Modular monoliths
 
-Control PlaneとNode Agentは、それぞれ一つのprocessとして動くmodular monolithです。二つのprocessが分かれる理由はmachine boundaryであり、domainごとのmicroservice化ではありません。
-
-```text
-Control Plane modular monolith  <— network boundary —>  Node Agent modular monolith
-```
-
-内部moduleは責務、state ownership、dependency directionを明確にします。独立deployment、scale、failure isolationが実証されるまでnetwork serviceへ分割しません。
+Control PlaneとNode Agentはmachine boundaryで分離した二つのmodular monolithです。domainごとのmicroservice、message broker、distributed transactionは導入しません。
 
 ## Policy above, mechanism below
 
-- Control Planeは「何を、なぜ、どの順番で行うか」を決める
-- Node Agentは「Node上でどう安全に実行し、何が観測されたか」を扱う
+- Control Planeは何を、いつ、どの順番で行うか決める
+- Node AgentはNode上でどう実行し、何が起きたかを報告する
 
-Node AgentはMinecraft、restic、Podmanを知ってよいですが、serverをいつ停止するか、backup成功前にNodeを解放してよいかといった全体policyは所有しません。
+Node Agentはglobal lifecycle policyを所有せず、Control Planeはshell commandやPodman commandを直接構築しません。
 
-## Explicit domain ownership
+## JSON-RPC at process boundaries
 
-主要domainは次です。
+Operator APIとAgent APIはJSON-RPC 2.0を共通envelopeにします。独自message framingや独自RPC error envelopeを作りません。
 
-```text
-Minecraft Server
-Server Data
-Workload
-Node
-```
+Transportはboundaryごとに選びます。
 
-下位moduleは上位domainを知りません。
+- Operator API: HTTP/2 over Unix domain socket
+- Agent API: HTTPS with HTTP/2
 
-- NodeはMinecraftを知らない
-- WorkloadはMinecraftのsave semanticsを知らない
-- Server DataはMinecraft fileの内容を解釈しない
-- Minecraft Serverはprovider APIやrestic commandを直接呼ばない
+## Agent-initiated communication
 
-## Desired state and observed state
+Nodeへmanagement portを公開しません。Agentがoutbound syncを開始し、Control Planeはsync resultとしてCommandを返します。
 
-command responseやAPI responseだけで実世界の状態を確定しません。desired state、persisted intent、external observation、derived statusを区別します。
+## At-least-once delivery, idempotent effect
 
-## Level-triggered reconciliation
+response lossを完全になくすことはできません。Control PlaneはCommandを再配送でき、AgentはOperation IDとStageをjournalへ記録して重複effectを防ぎます。
 
-eventはlatencyを下げるhintです。event deliveryを正しさの前提にせず、restart後もdurable stateとfresh observationから再評価できるlevel-triggered controllerを使用します。
+exactly-once deliveryを主張しません。
 
-## External mutation can be uncertain
+## Desired state and bounded reconciliation
 
-network timeoutやconnection lossの後、mutationが実行されなかったとは限りません。blind retryせず、read-only observationから結果を確定します。確定不能またはidentity contradictionならaffected scopeのmutationを停止します。
+Controllerはdesired state、Operation、fresh Observationを読み、一回に最大一つの次actionを決めます。eventとin-memory sessionはlatency optimizationであり、restart recoveryの前提ではありません。
 
-## Safety over automatic progress
+## Recover automatically by default
 
-安全に判断できない場合は停止し、Incidentとして理由を残します。不可視な無期限retry、ownershipを無視したcleanup、推測によるsuccess transitionを行いません。
+DNS、timeout、429、5xx、Agent disconnect、process restartは通常の運用条件です。bounded backoffで自動retryまたは再観測します。
 
-## Durable data, replaceable nodes
+Incidentはidentity contradiction、multiple active allocation、unknown data overwriteなど、安全な自動選択ができない場合に限定します。
 
-Node lifecycleとServer Data lifecycleを分離します。Nodeを失っても、verified Snapshotから新しいNodeへrestoreできる設計を目指します。
+## Server Home is the recovery unit
 
-## Narrow external ownership
+worldだけをbackup対象にしません。`data/`、runtime manifest、server-local secretを一つのServer Homeとして扱い、Snapshotから同じ起動条件を復元できるようにします。
 
-- Control Plane databaseへのwrite ownerはControl Planeだけ
-- Akamai mutation ownerはNode subsystemだけ
-- Node上のlocal mutation ownerはNode Agentだけ
-- Operator clientとDiscord botはdatabaseやproviderへ直接接続しない
+## Replaceable nodes, fenced ownership
 
-## Generalize from evidence
+一つのMinecraft Serverに同時に一つのactive Nodeだけを割り当てます。allocationごとのFencing Tokenにより、古いNodeや遅延Commandが新しい状態を変更することを防ぎます。
 
-- generic provider abstractionを先に作らない
-- stateful cloud simulatorを作らない
-- future useだけのtraitを増やさない
+## Explain current progress
+
+すべてのlong-running mutationはOperationとして表示できなければなりません。Operatorは少なくとも次を確認できます。
+
+- current stage
+- last observation
+- retry予定
+- automatic recoveryの有無
+- Operator actionが必要か
+
+## Generalize only from evidence
+
+- generic cloud provider APIを先に作らない
 - generic workflow engineを作らない
-- actual second implementationまたは明確なtest seamが生じた時点で抽象化する
+- future useだけのcrateやtraitを増やさない
+- second implementationが現れるまで共通化しない
 
-## Bounded resources
+## Keep destructive rules explicit
 
-retry、stream、payload、buffer、concurrency、operation durationには有限上限を持たせます。default値とprotocol invariantを区別し、実測で調整可能にします。
+Node delete、restore overwrite、Snapshot deleteなどの破壊的操作には明示的preconditionを定義します。通常のreadやretryまで同じ厳格さへ引き上げません。

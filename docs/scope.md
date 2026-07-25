@@ -1,51 +1,64 @@
 # Scope
 
-## System scope
+## v1 system scope
 
 このsystemは次を管理します。
 
+- `MinecraftServer`のdesired state、configuration、status
+- itzg/minecraft-serverをPodman、Quadlet、systemdで実行するruntime
+- `/data`とitzg runtime configurationを一体にした`Server Home`
+- RCONによるreadiness、player observation、save、graceful stop
+- resticによるCloudflare R2へのbackupとrestore
 - Akamai Cloud上のCompute Instance provisioningと削除
-- GNU/Linux Nodeのbootstrap、identity、observation、readiness
-- Node Agentのenrollment、mTLS session、local operation
-- Podman、Quadlet、systemdを利用したWorkload lifecycle
-- Minecraft Serverのconfiguration、readiness、save、stop、状態観測
-- Server Dataのbackup、restore、snapshot、retention、verification
-- 上記を協調させるMinecraft Server lifecycle orchestration
-- Unix domain socket上のOperator API
-- `mcserverctl`、Discord bot、local automationなどのtrusted local client
+- GNU/Linux Nodeのbootstrap、registration、observation、allocation
+- JSON-RPC 2.0 over HTTP/2によるOperator APIとAgent API
+- durable `Operation`、retry、restart recovery、status condition、event
+- `mcserverctl`、Discord Bot、local automationなどのtrusted client
 
 ## Initial deployment profile
 
-- Control PlaneはOCI Compute上で常時稼働する一つのprocess
-- managed NodeはAkamai CloudのCompute Instance
-- Node Agentはmanaged Node上に常駐し、Control Planeへoutbound接続する
-- Agent endpointはstable DNS nameを使用し、Control PlaneがQUIC/TLSを直接終端する
-- persistent backup backendはCloudflare R2
-- deploymentはsmall-community向けのsingle-operator-domainを基本とする
-
-これらは最初のdeployment profileであり、generic multi-cloud platformの約束ではありません。
+- Control PlaneはOCI Compute上の一つのprocess
+- Control Plane databaseはlocal SQLite
+- managed NodeはAkamai Cloud Compute Instanceまたは手動登録Node
+- Node OSはDebian GNU/Linuxをinitial targetとする
+- Node AgentはControl Planeへoutbound HTTPS connectionを作る
+- Agent APIはHTTP/2を要求する
+- Minecraft runtimeはitzg/minecraft-serverのみ
+- 一つのMinecraft Serverに同時に一つのactive Node
+- 一つのNodeに同時に一つのMinecraft Server
+- backup backendはCloudflare R2上のrestic repository
+- 一つのMinecraft Serverにつき一つのrestic repository
+- すべてのrepositoryで一つのDeployment Restic Passwordを共有する
 
 ## Explicit non-goals
 
-現在は次を目標にしません。
+v1では次を実装しません。
 
-- public hosting SaaS
-- multi-tenant isolation、billing、self-service signup
-- enterprise policy engine
+- public hosting SaaS、multi-tenancy、billing
 - general-purpose container orchestrator
-- arbitrary remote shell platform
-- generic workflow engine
+- Minecraft以外のworkload
+- generic Workload resource
 - generic cloud provider plugin ecosystem
-- Control Planeのhigh availability
+- generic workflow engine
+- message broker、distributed database、consensus protocol
+- Control Plane high availability
+- Node pool、bin packing、live migration
 - public remote Operator API
-- web dashboardを初期要件にすること
-- Node pool、bin packing、automatic workload migration
-- pre-stable RPC、database、configuration、CLI、certificate profileとのbackward compatibility
+- arbitrary remote shellまたはarbitrary RCON proxy
+- private PKI、offline Root CA、short-lived Agent certificate rotation
+- backupごとの追加repository verification
+- 定期`restic check`をsystem invariantにすること
+- 自動restore drillをv1 completion条件にすること
+- pre-stable schema、RPC、CLIとのbackward compatibility
 
-## Development compatibility
+## Trust assumptions
 
-最初のstable releaseまでは、RPC、database、configuration、CLI、certificate profile、resource modelの後方互換性を保証しません。変更が必要な場合、compatibility shimやdual-writeよりcurrent designの単純さと正しさを優先します。
+- restic exit code 0は、全source fileを含むSnapshotが作成された成功結果として扱う
+- Cloudflare R2のdocumented consistencyとdurabilityをstorage contractとして信頼する
+- systemd、Podman、itzg/minecraft-serverのdocumented behaviorを再実装しない
+- managed Nodeのrootはtrusted boundaryとする
+- Operator APIへaccessできるlocal processはfull-control clientとする
 
 ## Milestone discipline
 
-全systemを同時に実装しません。最初はfoundationとNode Managementを構築し、そのcontractの上へWorkload、Server Data、Minecraft Serverを追加します。現在のplanは[`plans/`](plans/README.md)を参照してください。
+全systemをhorizontal layerごとに作りません。まず手動登録Node上でMinecraft Serverを起動・停止できるvertical sliceを完成させ、その後durability、backup、Akamai automationを追加します。詳細は[`plans/`](plans/README.md)を参照してください。

@@ -1,86 +1,105 @@
 # Architecture overview
 
-この文書はsystem全体のdependency、process boundary、authorityを要約します。resourceとend-to-end lifecycleの導入は[`system-model.md`](../system-model.md)を参照してください。
+この文書はsystem全体のprocess boundary、authority、dependencyを要約します。resourceとlifecycleの導入は[`system-model.md`](../system-model.md)を参照してください。
 
 ## System shape
 
-Minecraft Server Management Systemは、二つのmodular monolithと複数のexternal systemから構成されます。
-
 ```text
 Operator clients
-    │
+    │ JSON-RPC / HTTP/2 / Unix socket
     ▼
 Control Plane
+    ├─ MinecraftServer Controller
+    ├─ Node Controller ───────────────> Akamai Cloud
+    ├─ Operation Engine
+    ├─ Snapshot metadata
+    └─ SQLite
+    ▲
+    │ JSON-RPC / HTTPS / HTTP/2
+    │ Agent-initiated sync
     │
-    ├─ Minecraft Server
-    ├─ Server Data
-    ├─ Workload
-    └─ Node ───────────────> Akamai Cloud
-    │
-    │ authenticated Agent protocol
-    ▼
 Node Agent
-    │
-    ├─ Minecraft Server ───> Management Protocol / RCON
-    ├─ Server Data ────────> restic / filesystem / R2
-    ├─ Workload Runtime ───> Podman / Quadlet / systemd
-    └─ Node ───────────────> GNU/Linux / systemd
+    ├─ Server Runtime ────────────────> systemd / Podman / Quadlet
+    │                                     └─ itzg/minecraft-server
+    ├─ Minecraft control ─────────────> local RCON
+    ├─ Server Home ───────────────────> filesystem
+    └─ Backup adapter ────────────────> restic / Cloudflare R2
 ```
+
+## Primary aggregate
+
+`MinecraftServer`がprimary aggregateです。Node、Server Home、Snapshot、OperationはMinecraft Server lifecycleを支えます。
+
+```text
+MinecraftServer
+  ├─ desired Spec and Generation
+  ├─ active Node Allocation
+  ├─ Server Home
+  ├─ latest Snapshot
+  ├─ current Operation
+  └─ Conditions
+```
+
+Server Runtimeはpublic resourceではなく、Node AgentがMinecraftServer Specをmaterializeしたlocal implementationです。
+
+## Authority
+
+| Concern | Authority |
+| --- | --- |
+| desired Minecraft configuration | Control Plane database |
+| Operation stage、retry、result | Control Plane database |
+| Agent command execution result | Agent local operation journal |
+| Compute Instance existence | Akamai API |
+| active Node allocation | Control Plane database + Fencing Token |
+| runtime state | systemd、Podman、RCON observation |
+| Server Home contents | Node filesystem |
+| backup success and Snapshot ID | restic command result |
+| Snapshot bytes | restic repository on R2 |
 
 ## Dependency direction
 
 ```text
-MinecraftServerController
-    ├─ uses Minecraft Server operations
-    ├─ uses Server Data operations
-    ├─ uses Workload operations
-    └─ uses Node lifecycle
+MinecraftServer application
+    ├─ uses Node allocation service
+    ├─ creates durable Operations
+    └─ dispatches typed Agent Commands
 
-Workload
-    └─ requires a Ready Node
+Node application
+    └─ uses Akamai adapter and Agent observation
 
-Server Data
-    └─ requires an execution location and filesystem access
-
-Node
-    ├─ uses Node Agent Node capability
-    └─ uses Akamai Compute Adapter
+Agent capabilities
+    ├─ runtime
+    ├─ minecraft
+    ├─ server_home
+    └─ backup
 ```
 
-依存関係はDAGであり、すべてのmoduleが平らに相互依存する構造ではありません。
+Akamai、Podman、restic、RCONのconcrete typeやcommand lineをapplication domainへ漏らしません。
 
-## Process boundary and module boundary
+## Control loop
 
-Control Plane側とNode Agent側には対応するdomain moduleがあります。
-
-| Control Plane | Node Agent | Responsibility across boundary |
-| --- | --- | --- |
-| `node` | `node` | Node observation、bootstrap result、Node-level operation |
-| `workload` | `workload` | Workload apply/start/stop/observe |
-| `server_data` | `server_data` | backup、restore、check、prune |
-| `minecraft` | `minecraft` | Minecraft-specific observe/save/stop/control |
-
-対応は「内部構造を完全に鏡写しにする」という意味ではありません。同じdomain languageでtyped contractを持ち、transport coreやexternal toolのdetailを跨いで漏らさないという意味です。
-
-## Authority
-
-- Control Planeはdesired state、policy、durable operation、Incidentを所有する
-- Node Agentはlocal execution、local observation、local adapter selectionを所有する
-- Akamai CloudはCompute Instanceのprovider truthを持つ
-- restic repositoryはbackup dataとSnapshotのtruthを持つ
-- Minecraft processはapplication stateのtruthを持つ
-
-Control Planeのdatabaseはexternal systemの代替truthではありません。外部stateをtimestamp付きObservationとして保持します。
-
-## Initial build order
+Controllerは一回のreconciliationで次を行います。
 
 ```text
-Foundation
-  → Node Management
-  → Workload Runtime
-  → Server Data
-  → Minecraft Server Control
-  → Lifecycle Orchestration
+load Spec, Status, active Operation
+  → evaluate fresh Observation
+  → validate allocation and generation
+  → persist one next stage or retry time
+  → return
+```
+
+外部処理はOperation StageとしてAgentまたはprovider adapterへ委譲します。eventはreconcileを早めますが、正しさはdatabaseとobservationに依存します。
+
+## Build order
+
+```text
+Architecture Reset
+  → Local Node vertical slice
+  → Durable Operations and reconnect
+  → Backup and restore
+  → Akamai Node lifecycle
+  → Smart automation
+  → Hardening
 ```
 
 詳細は[`plans/`](../plans/README.md)を参照してください。

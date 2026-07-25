@@ -18,15 +18,15 @@ Historical contextは[`design-lineage.md`](design-lineage.md)に限定し、firs
 - filenameはEnglish kebab-case
 - 本文は日本語を基本とする
 - identifier、protocol field、official product/protocol nameはEnglish
-- `Node`、`Workload`、`Controller`など定義済みtermを無理に日本語化しない
+- `Node`、`Server Home`、`Operation`など定義済みtermを無理に日本語化しない
 
 ## Authority and duplication
 
 一つの事実には一つの正本を持たせます。
 
 ```text
-Why QUIC?                  → ADR
-How Agent Protocol works?  → interfaces/agent-protocol.md
+Why HTTP/2 Agent pull?      → ADR
+How Agent API works?       → interfaces/agent-protocol.md
 When to implement it?      → plans/
 ```
 

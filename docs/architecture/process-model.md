@@ -6,16 +6,18 @@
 
 所有するもの:
 
-- application database
-- desired stateとstatus
-- controller scheduling
-- durable operationとIncident
+- SQLite application database
+- MinecraftServer Spec、Generation、Status
+- Node identity、allocation、provider binding
+- durable Operation、Condition、Event、Incident
+- reconciliation scheduling
 - Akamai API credential access
-- Agent issuing authorityとserver TLS material
 - Operator API Unix socket
-- Agent QUIC endpoint
+- Agent API HTTPS endpoint
+- Node enrollment tokenとAgent credential hash
+- Deployment Restic Passwordへのaccess
 
-process restart後はdatabaseとexternal observationから再収束します。memory上のAgent sessionやheartbeatは失われたものとして扱います。
+Control Plane restart後はdatabaseからactive Operationとretry scheduleを再構築します。memory上のAgent Sessionは失われたものとして扱い、新しいAgent Syncでlivenessを回復します。
 
 ## `mcserver-node-agent`
 
@@ -23,40 +25,53 @@ process restart後はdatabaseとexternal observationから再収束します。m
 
 所有するもの:
 
-- Node identity private key
-- Control Plane connection lifecycle
-- local operation execution
-- local capability discovery
-- local operation journalに必要な最小state
-- Node、Workload、Server Data、Minecraftのobservation
+- Node IDとAgent credential
+- Agent Session ID
+- HTTP/2 connectionとsync loop
+- local operation journal
+- Server Home filesystem
+- materialized Quadlet files
+- local runtime、RCON、restic operation
+- Node、runtime、MinecraftのObservation
 
-Node AgentはControl Planeとのconnection loss後、自律的にreconnectします。ただしidentity rejectionやexplicit disablementを一時的network failureとして高速retryしません。
+AgentはControl Planeとのconnection loss後にjitter付きbackoffで再接続します。Control Planeからcommandをpushされるためのinbound portは持ちません。
+
+## Agent concurrency
+
+Agentは少なくとも次を分離します。
+
+- sync loop
+- one active mutating Operation Stage per MinecraftServer
+- local observation loop
+- runtime process supervisionはsystemdへ委譲
+
+HTTP/2によりsyncとresult reportingは同じconnection上のseparate streamとして並行できます。
 
 ## `mcserverctl`
 
-配置: Control Planeと同じVMまたはUnix socketへaccessできるtrusted local environment
+配置: Control Planeと同じhostまたはOperator socketへaccessできるtrusted environment
 
 責務:
 
-- Operator APIのtyped client
-- human-readable output
-- command argument validation
+- Operator API typed client
+- argument validation
+- human-readable status、Operation、Event表示
 - request correlation
 
-database、Akamai API、Node Agentへ直接接続しません。
+SQLite、Akamai、Agentへ直接接続しません。
 
 ## Discord Bot and local automation
 
-最初は`mcserverctl`と同じOperator API、同じUnix socket、同じControl Plane権限を使用します。Bot固有のDiscord role/user authorizationはBot側で行います。Control Planeのaudit recordには、Unix peer identityに加えてBotが申告したactor metadataを保存できますが、両者を同一のauthentication proofとはみなしません。
+`mcserverctl`と同じOperator APIを使用します。Discord user authorizationはBot側で行います。Control PlaneはUnix peer identityをauthentication actorとして記録し、Botが申告したDiscord actor metadataをaudit contextとして追加できます。
 
-## Child and external processes on a Node
+## External processes on a Node
 
-Node Agentは必要に応じて次を利用します。
+Node Agentは次を利用します。
 
 - systemd
 - Podman
+- itzg/minecraft-server container
+- local RCON client
 - restic subprocess
-- Minecraft Server Management Protocol client
-- RCON client
 
-外部command lineの文字列をControl Plane RPCへ露出させず、Node Agent内のtyped adapterで変換します。
+Node Agentはtyped adapterを所有し、external command lineをAgent APIへ露出させません。

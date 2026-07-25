@@ -1,28 +1,23 @@
 # Domain overview
 
-主要resourceの関係を初めて読む場合は、先に[System model](../system-model.md)を参照してください。
+主要resourceの関係は[System model](../system-model.md)を参照してください。
 
-主要domainは次の四つです。
+v1のdomainは三つのbusiness concernへ整理します。
 
 ```text
 Minecraft Server
-  ├─ coordinates Server Data
-  ├─ coordinates Workload
-  └─ coordinates Node
+  ├─ uses Server Home
+  └─ uses Node
 
-Server Data
-Workload
-Node
+Operationはdomainを横断するdurable execution model
+SnapshotはServer Home backupのresult
 ```
-
-それぞれはconcept、invariant、state ownershipを持ちますが、別microserviceではありません。Control PlaneとNode Agentのmodular monolith内に対応moduleを持ちます。
 
 | Domain | Main question |
 | --- | --- |
-| [Minecraft Server](minecraft-server.md) | Minecraft applicationをどの状態にしたいか |
-| [Server Data](server-data.md) | 永続file treeをどのSnapshotとして保護・復元するか |
-| [Workload](workload.md) | Node上でprogramをどう安全に実行するか |
-| [Node](node.md) | 使用可能なGNU/Linux execution environmentをどう確保・観測・解放するか |
-| [Lifecycle orchestration](lifecycle-orchestration.md) | 複数domainをどの順序で協調させるか |
+| [Minecraft Server](minecraft-server.md) | どのMinecraft serverを、どの設定で、どの状態にするか |
+| [Server Home](server-home.md) | `/data`と起動設定をどのように一体で保存・復元するか |
+| [Node](node.md) | 実行可能なGNU/Linux machineをどう確保・allocate・解放するか |
+| [Lifecycle orchestration](lifecycle-orchestration.md) | start、stop、backup、restoreをどの順序で進めるか |
 
-各domain documentは責務だけでなく、**non-responsibilities**を明示します。
+`Workload`はv1のdomainではありません。itzg/minecraft-server以外を実行しないため、container runtimeはMinecraft Server domainのinternal `Server Runtime`として扱います。

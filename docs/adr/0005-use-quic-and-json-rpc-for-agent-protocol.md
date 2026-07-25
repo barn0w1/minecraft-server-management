@@ -1,20 +1,17 @@
 # ADR-0005: Use QUIC, mTLS, and JSON-RPC for the Agent Protocol
 
-Status: Accepted
+Status: Superseded by ADR-0012
 
 ## Context
 
-一つのoutbound long-lived connection上で双方initiated RPCを多重化でき、managed Nodeへinbound management portを増やさずに済む。JSON-RPCはsimpleでtyped schemaをproject側で定義できる。
+outbound long-lived connection上でbidirectional RPCを多重化するため、raw QUIC、mTLS、JSON-RPCを選択しました。
 
-## Decision
+## Original decision
 
-Control PlaneとNode Agentのremote protocolにraw QUIC v1/TLS 1.3を使用し、application envelopeに限定したJSON-RPC 2.0 profileを使用する。一request/responseは一bidirectional stream、notificationは一unidirectional streamへmappingする。
+一request/responseを一QUIC streamへmappingし、custom length framingを使用するprotocolを採用しました。
 
-## Consequences
+## Supersession
 
-HTTP ecosystemを直接利用しないためframing、limit、deadline、version、error、idempotencyを明示する必要がある。0-RTT application dataはreplay riskのため使用しない。
+raw QUICはframing、stream lifecycle、limit、debugging、PKIをproject固有に実装する範囲を増やしました。
 
-## Related documents
-
-- [Design principles](../design-principles.md)
-- [Architecture overview](../architecture/overview.md)
+[ADR-0012](0012-use-json-rpc-over-http2-agent-pull.md)はJSON-RPCを維持しつつ、HTTP/2、standard HTTPS、Agent-initiated pullへ置き換えます。

@@ -8,35 +8,46 @@
 | Discord Bot | Operator APIを利用するtrusted local process。Discord user authorizationはBot側で行う |
 | OCI Compute | Control Planeを常時稼働させるinitial deployment location |
 | Akamai Cloud | managed Compute Instanceを提供するinitial compute provider |
-| Cloudflare DNS | Agent endpointのstable DNS nameを提供する。proxyせずdirect QUIC endpointへ解決する想定 |
-| Cloudflare R2 | restic repositoryを置くinitial object storage backend |
-| Node | Node AgentとWorkloadが動くmanaged GNU/Linux machine |
-| Minecraft Server | Node Agentのlocal clientから制御・観測されるapplication process |
+| Cloudflare DNS | Agent API endpointのstable DNS nameを提供する |
+| Cloudflare R2 | restic repositoryを保持するobject storage backend |
+| Node | Node AgentとServer Runtimeが動くmanaged GNU/Linux machine |
+| itzg/minecraft-server | Minecraft Server processを構成・起動する唯一のruntime image |
 
 ## Trust boundaries
 
 ```text
-Operator account / local Unix users
+Operator / local Unix account
         │
         │ filesystem permission
         ▼
 Control Plane trust boundary
         │
-        │ private PKI / mTLS
+        │ HTTPS / HTTP/2
+        │ per-Node credential
         ▼
-Node Agent trust boundary
+Node trust boundary
         │
-        ├─ local system interfaces
-        ├─ Minecraft local management endpoint
-        └─ object storage credentials
+        ├─ systemd / Podman
+        ├─ local-only RCON
+        └─ scoped backup credential
 ```
 
-Discord BotはControl Planeに対してfull-control Operator clientとなり得ます。Discord userごとのpermissionはBot内で検証しますが、Bot process自体が侵害された場合はOperator権限を持つものとして扱います。
+Control Planeとmanaged Nodeは同じDeploymentに属するtrusted componentsですが、network failureとstale Nodeは発生するものとして扱います。
 
 ## Network posture
 
-- Operator APIはControl Plane VM内のUnix domain socketだけで公開する
-- Node AgentはControl Planeへoutbound QUIC connectionを開始する
-- managed Nodeへ一般的なinbound management portを公開しない
-- Minecraft Server Management ProtocolやRCONは原則としてNode内のloopbackまたはlocal-only networkへ限定する
-- break-glass SSHは例外的なoperator recovery手段であり、normal lifecycleやreadinessの依存先にしない
+- Operator APIはUnix domain socketだけで公開する
+- Node AgentがControl Planeへoutbound HTTPS connectionを開始する
+- Agent APIはALPN `h2`でHTTP/2を使用する
+- managed Nodeへ一般的なinbound management APIを公開しない
+- RCONはNode local endpointだけにbindし、public portへpublishしない
+- Minecraft game portだけをplayer accessのために公開する
+- break-glass SSHはnormal automationから独立したoperator recovery手段とする
+
+## External trust assumptions
+
+- Akamai API responseとinventoryをprovider stateのauthorityとする
+- successful restic commandをbackup resultのauthorityとする
+- Cloudflare R2のdocumented consistencyとdurabilityを信頼する
+- systemdをlocal process supervisionのauthorityとする
+- itzg/minecraft-serverのdocumented `/data`、RCON、health behaviorを利用する

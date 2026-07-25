@@ -2,47 +2,110 @@
 
 ## Purpose
 
-`MinecraftServerController`は、Minecraft Server、Server Data、Workload、Nodeを一つのdesired lifecycleとして協調させます。
+`MinecraftServerController`はMinecraftServer Specを、Node allocation、Server Home、Server Runtime、Snapshot、Operationへ展開してdesired lifecycleへ収束させます。
 
-## Running workflow
-
-```text
-MinecraftServer desired state = Running
-  → Nodeを要求または選択
-  → Node Readyを待つ
-  → Server Data restoreを開始
-  → verified restore completionを待つ
-  → Workload revisionを適用
-  → Workload runningを確認
-  → Minecraft application readinessを確認
-  → MinecraftServer Readyを導出
-```
-
-各stepはdurable Operationまたは下位resourceとして追跡し、Control Plane restart後も続行または再評価できるようにします。
-
-## Stopping workflow
+## Start Operation
 
 ```text
-MinecraftServer desired state = Stopped
-  → 新規接続を必要に応じて抑止
-  → Minecraft saveを要求
-  → save completionを確認
-  → graceful stopを要求
-  → Workload stoppedを確認
-  → Server Data backupを開始
-  → Snapshotとverificationを確認
-  → policyに従いNodeをrelease
+server.start
+  → acquire_node
+  → wait_agent
+  → prepare_server_home
+  → restore_snapshot_if_needed
+  → apply_generation
+  → start_runtime
+  → wait_readiness
+  → complete
 ```
 
-backup前にNodeを削除しません。saveやbackupのoutcomeが不明な場合は、安全側へ停止します。
+- Server Homeが既にcurrent Nodeにある場合はrestoreを省略する
+- 初回起動ではempty Server Homeを作成する
+- replacement Nodeでは指定またはlatest successful Snapshotからrestoreする
+- each Stageはidempotentであり、restart後に再評価できる
 
-## Failure isolation
+## Stop Operation
 
-- Minecraft control failureは、必要がなければAkamai mutationを直接blockしない
-- backup uncertaintyはNode releaseをblockする
-- Node failure時はServer Dataのlast verified Snapshotからreplacement workflowを検討する
-- unrelated Minecraft Serverのlifecycleは継続できる
+```text
+server.stop
+  → request_graceful_stop
+  → wait_runtime_stopped
+  → backup_server_home
+  → release_node_if_policy
+  → complete
+```
 
-## Orchestration style
+`OnDemand` policyでNodeをreleaseする場合、stop後のbackup Stage成功を要求します。restic exit code 0とSnapshot ID取得でbackup Stageを成功とします。
 
-generic workflow engineを導入せず、Minecraft Server application layerの明示的なstate machine/controllerとして実装します。共通化は、複数の実workflowで同じpatternが確認された後に行います。
+Nodeを残すpolicyでは、Operator設定によりbackupを省略できます。
+
+## Backup Operation
+
+### Offline
+
+runtimeがStoppedならServer Homeへ直接restic backupを実行します。
+
+### Online
+
+runtimeがRunningならRCON save quiesce、restic backup、save resumeを一つのOperationとして扱います。
+
+backup successとsave resume failureは別々にstatusへ表現できます。Snapshotが作成されてもsaveが再開できなければ`Degraded=True`です。
+
+## Restore Operation
+
+```text
+server.restore
+  → require_runtime_stopped
+  → inspect_destination
+  → prepare_empty_destination
+  → restic_restore_snapshot
+  → read_manifest
+  → reconcile_desired_spec
+  → complete
+```
+
+unknown fileを持つdestinationへsilent overwriteしません。既存Server Homeを置換する場合はOperatorが明示したrestore modeまたはsystem-owned staging directoryを使用します。
+
+Snapshot manifestとcurrent Specが異なる場合、次を区別します。
+
+- `RestoreAndUseSnapshotConfig`: manifestのconfigurationをnew Specとしてimportする
+- `RestoreDataAndApplyCurrentSpec`: dataをrestore後、current Specをmaterializeする
+
+exact CLI/APIはRestore milestoneで定義します。
+
+## Update Operation
+
+```text
+server.update
+  → optional_pre_update_backup
+  → stop_runtime_if_required
+  → apply_new_generation
+  → start_runtime
+  → wait_readiness
+```
+
+Minecraft version migrationを伴うupdateのrollbackは、previous container configurationだけでなくpre-update Snapshot restoreを明示的に選択します。
+
+## Node loss recovery
+
+```text
+active Node unavailable beyond policy threshold
+  → mark RuntimeReady Unknown
+  → fence old Allocation
+  → provision or select replacement Node
+  → restore latest successful Snapshot
+  → apply current Spec
+  → start runtime
+```
+
+Node loss直前のunbacked dataまで復元できるとは主張しません。Operatorへlatest Snapshot timestampを明示します。
+
+## Automation policies
+
+initial policy:
+
+- `AlwaysOn`: Nodeとruntimeを維持する
+- `OnDemand`: Stopped後にbackupしてNodeをreleaseする
+- `Scheduled`: scheduleがdesired stateを変更する
+- `Manual`: Operatorだけがdesired stateを変更する
+
+idle shutdownはplayer observationからControl Planeがdesired stateを`Stopped`へ変更します。itzg image側のindependent auto-stopと二重管理しません。

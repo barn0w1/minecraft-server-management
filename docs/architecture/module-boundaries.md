@@ -3,79 +3,94 @@
 ## Control Plane modules
 
 ```text
-interface
+interfaces
   ├─ operator_api
   └─ agent_api
         ↓
 application
-  ├─ minecraft
-  ├─ server_data
-  ├─ workload
-  └─ node
+  ├─ minecraft_server
+  ├─ node
+  ├─ operation
+  └─ snapshot
         ↓
 domain models and narrow ports
         ↑
 infrastructure
   ├─ sqlite
+  ├─ http2_jsonrpc
   ├─ akamai
-  ├─ quic
-  ├─ pki
   └─ filesystem/secrets
 ```
 
-- interfaceはdecode、authentication context、response mappingを担当する
-- applicationはuse case、transaction boundary、operation intent、orchestrationを担当する
-- domainはinvariantとstate transitionを表現し、SQL、HTTP、filesystemへ依存しない
-- infrastructureはexternal I/Oを実装する
-- runtime wiringだけがconcrete implementationを接続する
+### `minecraft_server`
+
+Spec、Generation、Condition、lifecycle policy、start/stop/update/backup/restore orchestrationを所有します。
+
+### `node`
+
+Node identity、provider binding、allocation、Fencing Token、readiness、provision/deleteを所有します。
+
+### `operation`
+
+Operation lifecycle、stage、attempt、deadline、retry scheduling、eventを所有します。generic workflow languageは持たず、operation kindごとのexplicit controllerを支えます。
+
+### `snapshot`
+
+successful restic resultから得たSnapshot metadataとretention intentを所有します。repository integrity checkerは所有しません。
 
 ## Node Agent modules
 
 ```text
 agent_core
   ├─ enrollment
-  ├─ identity
-  ├─ connection
-  ├─ heartbeat
-  ├─ rpc_dispatch
-  └─ task supervision
+  ├─ credential
+  ├─ http2_sync
+  ├─ operation_journal
+  └─ task_supervision
 
 capabilities
-  ├─ node
-  ├─ workload
-  ├─ server_data
-  └─ minecraft
+  ├─ runtime
+  ├─ minecraft
+  ├─ server_home
+  ├─ backup
+  └─ node_observation
 
 adapters
-  ├─ linux/systemd
-  ├─ podman/quadlet
-  ├─ restic/filesystem
-  └─ management_protocol/rcon
+  ├─ systemd
+  ├─ podman_quadlet
+  ├─ itzg
+  ├─ rcon
+  ├─ filesystem
+  └─ restic
 ```
 
-`agent_core`はMinecraft、restic、Podmanのdomain ruleを知りません。RPC methodを認証済みconnection contextとともに対応capabilityへdispatchします。
+`agent_core`はMinecraft configurationやbackup policyを決めません。Commandを認証済みNode contextとともにcapabilityへdispatchし、journalへresultを保存します。
 
 ## Ownership rules
 
-- moduleは自身が所有するtableだけを更新する
-- sibling moduleのinternal typeやtableへ直接依存しない
-- cross-domain actionはapplication-level commandまたはquery contractを通す
+- moduleは自身が所有するtableだけを直接更新する
+- sibling moduleのprivate modelへ依存しない
+- RPC handlerはtransactionとlifecycle policyを直接組み立てない
 - external adapter typeをdomain public APIへ漏らさない
-- shared crateはwire contractや本当に共有されるprimitiveだけに限定する
+- wire DTOとdomain modelを同一typeにしない
+- shared crateにはJSON-RPC DTO、ID、stable error kindだけを置く
 
 ## Allowed dependencies
 
 ```text
-minecraft application → server_data, workload, node ports
-server_data application → Node Agent data execution port
-workload application → node availability/query port
-node application → Akamai adapter, Agent node port
+minecraft_server application → operation, node, agent command ports
+node application             → operation, akamai, agent query ports
+snapshot application         → operation result and metadata store
+agent runtime capability     → systemd, podman, itzg adapters
+agent backup capability      → filesystem, restic adapters
+agent minecraft capability   → rcon, runtime observation
 ```
 
-禁止例:
+## Forbidden dependencies
 
-- Akamai adapterがMinecraftServerを読む
-- Minecraft moduleがLinode APIを直接呼ぶ
-- Server Data moduleがRCONでsaveを実行する
-- Workload moduleがMinecraft player数を解釈する
-- RPC handlerがdatabase transactionとlifecycle policyを直接組み立てる
+- MinecraftServer controllerがAkamai HTTP requestを直接作る
+- Control Planeがshell、Podman、restic、RCON command stringを送る
+- Node Agentがidle shutdownやNode delete policyを決める
+- Snapshot moduleがMinecraft save commandを実行する
+- Discord Botがdatabase、Akamai、Agentへ直接接続する
+- generic Workload abstractionをMinecraft runtimeの前に挟む

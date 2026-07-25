@@ -2,66 +2,61 @@
 
 ## Goal
 
-新しく作成したCompute Instance上のNode Agentへ、logical Node identityにbindingされたprivate keyとshort-lived client certificateを安全に発行します。
+新しいNode Agentへlogical Node identityにbindingされたAgent Credentialを一度だけ発行し、通常のAgent APIを利用可能にします。
 
 ## Preconditions
 
-Control PlaneはCompute Instance作成前に次をdurableにします。
+Control Planeは次をdurableにします。
 
 - Deployment ID
 - Node ID
-- expected provider ownership identity
-- enrollment token digestとexpiry
-- bootstrap revision
-- expected Agent endpoint/trust anchor
+- expected Node sourceまたはprovider binding
+- Enrollment Token digest
+- token expiry
+- token state
 
 ## Flow
 
 ```text
-1. Control Plane creates Node identity and one-time token
-2. cloud-init receives Node ID, endpoint, Root CA certificate, token, bootstrap revision
-3. Node Agent generates its private key locally
-4. Agent connects with enrollment ALPN using server-authenticated TLS
-5. Agent submits token and CSR
-6. Control Plane validates token, Node/provider ownership, CSR proof-of-possession
-7. token is consumed atomically
-8. Control Plane returns Agent certificate chain
-9. Agent reconnects with normal ALPN and mTLS
-10. initial report establishes active session
+1. Control Plane creates Node ID and Enrollment Token
+2. Node receives endpoint, Node ID, token, server trust configuration
+3. Agent validates Control Plane TLS certificate
+4. Agent calls agent.enroll over HTTPS/HTTP/2
+5. Control Plane validates token digest, expiry, Node state
+6. token is consumed atomically
+7. Control Plane returns per-Node Agent Credential
+8. Agent stores credential in root-only file
+9. Agent starts authenticated agent.sync loop
+10. first accepted sync makes AgentAvailable observable
 ```
 
-Agent private keyはNodeから出しません。
-
-## Token properties
+## Enrollment Token
 
 - cryptographically random
 - one-time use
 - finite TTL
 - plaintextをdatabaseへ保存しない
-- process argumentやnormal logへ出さない
+- process argumentとnormal logへ出さない
 - successful enrollment後にbootstrap locationから削除する
-- replayをControl Plane restart後も拒否する
+- Control Plane restart後もreplayを拒否する
 
-Tokenは「当該bootstrap instanceの初回enrollment」を証明するだけです。Node内のroot compromiseに対する境界ではありません。
+## Agent Credential
 
-## Certificate profile
+- cryptographically random bearer credential
+- one Node IDへbindingする
+- Control Planeはdigestだけをdatabaseへ保存する
+- Agentは`/etc/mcserver/secrets/agent-credential`などのroot-only fileへ保存する
+- rotationはOperatorまたはfuture maintenance Operationで行える
+- Node release/replacement時にauthorizationをdisableする
 
-- URI SANにcanonical Node identity
-- `clientAuth` EKU
-- short lifetime
-- issuerはAgent issuing intermediate
-- certificate identityとdatabase上のactive Node authorizationを両方確認
-
-exact URI format、certificate lifetime、rotation thresholdはNode Management implementation前のP0 decisionです。SPIFFEを採用しない限りSPIFFE namespaceを使用しません。
-
-## Rotation
-
-Agentは新しいprivate keyまたはexisting keyのCSRを生成し、authenticated sessionからrotation requestを送ります。Control PlaneはNode authorization、current certificate、rotation ID、CSR fingerprintを検証します。response loss時はrotation IDから同じresultを再取得できるようにします。
+v1ではclient certificateとprivate keyを必要としません。
 
 ## Recovery
 
-private key喪失、identity rejection、bootstrap contradictionではsilent re-enrollmentを行いません。operator-approved recovery tokenまたはNode replacementのどちらを提供するかはNode Management v1で決定します。
+credential loss時はsilent re-enrollmentしません。Operatorがold authorizationをdisableし、新しいEnrollment Tokenを発行します。
+
+Akamai on-demand Nodeでは、credential recoveryよりNode replacementをdefaultにできます。
 
 ## Deletion
 
-Node release開始時に新規sessionとrotationを禁止し、active sessionをcloseします。Compute Instance Absent確認後にNode identityをfinalizeします。
+Node delete開始時にAgent authorizationをdisableし、新しいCommand allocationを停止します。Agentが接続中でもold Fencing TokenのCommandを拒否できるよう、Allocationをreleaseします。

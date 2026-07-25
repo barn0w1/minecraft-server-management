@@ -2,77 +2,98 @@
 
 ## Purpose
 
-Akamai CloudのCompute Instanceを、上位domainが利用できるidentity付き・観測可能・agent-readyなGNU/Linux Nodeへ変換し、安全に解放します。
+Minecraft Serverを実行できるidentity付きGNU/Linux machineを登録またはAkamai Cloud上に作成し、一つのMinecraftServerへallocateして安全に解放します。
 
 ## Owned concepts
 
 - `Node`
 - `NodeSpec`
 - `NodeStatus`
-- `NodeObservation`
-- `NodeIncident`
-- `AgentEnrollment`
-- `AgentSession`
 - `ComputeInstanceBinding`
+- `Allocation`
+- `FencingToken`
+- `AgentCredentialAuthorization`
 
-Nodeと、Nodeを要求するrequest/claim resourceを分離する必要があるかは、[Node Management v1 plan](../plans/node-management-v1.md)のP0 decisionです。必要性が証明されるまでは追加resourceを確定しません。
+## v1 invariants
 
-## Responsibilities
+- 一つのMinecraftServerにactive Allocationは最大一つ
+- 一つのNodeにactive Allocationは最大一つ
+- Allocationごとにmonotonic Fencing Tokenを発行する
+- Node Agent credentialは一つのNode IDへbindingする
+- Node IDとCompute Instance IDを混同しない
+- ownedと確認できないCompute Instanceをmutationしない
 
-- logical Node identityの発行
-- exact Akamai compute type、region、imageなどのprovisioning input管理
-- Compute Instanceのcreate、inventory、delete
-- ownership tagとexternal identityの検証
-- GNU/Linux bootstrap contract
-- Node Agent enrollmentとauthorization
-- provider、bootstrap、Agentのobservation
-- Node readinessの導出
-- release、delete、provider Absent確認、finalization
+## Node sources
+
+v1は二種類のNode sourceを扱います。
+
+### Registered Node
+
+Operatorが事前に用意し、Node Agentをinstallして登録するNodeです。最初のvertical sliceで使用します。
+
+### Akamai Node
+
+Control PlaneがAkamai APIでCompute Instanceをcreateし、bootstrapとAgent enrollmentを行うNodeです。後続milestoneで追加します。
+
+両者は上位MinecraftServerから同じ`NodeAvailable` contractとして利用しますが、provision/delete capabilityは異なります。
 
 ## Readiness
 
-`Ready`は単一のprovider statusではありません。少なくとも次を満たす必要があります。
+`NodeAvailable=True`には次を要求します。
 
-- owned Compute Instanceが存在し、expected identity/type/regionと一致する
-- bootstrap completionが成功として観測される
-- active Node Agent sessionがmTLSで認証される
-- heartbeatがfreshである
-- required initial reportが受理されている
-- Node-level blocking Incidentが存在しない
+- Node authorizationがactive
+- Agent Syncがfresh
+- required capability reportを受理済み
+- current Allocationまたはunallocated stateが矛盾していない
+- blocking Incidentがない
 
-## Non-responsibilities
+Akamai Nodeではさらにowned Compute Instanceがexpected provider bindingと一致することを要求します。
 
-- Minecraft playerやgame rule
-- Minecraft save/stop semantics
-- restic retention policy
-- Workload container specificationの意味
-- Nodeを複数Workloadへpackingするscheduler
-- arbitrary shell execution API
+## Allocation
 
-## Provider boundary
-
-initial providerはAkamai Cloudです。generic provider plugin systemを先に作らず、Node application layerからprivateなAkamai adapterを呼びます。
+MinecraftServerをNodeへ割り当てるtransactionで次を保存します。
 
 ```text
-NodeController
-  → Compute observation/mutation port
-  → AkamaiComputeAdapter
-  → Linode API client
+minecraft_server_id
+node_id
+fencing_token
+allocated_at
+released_at
 ```
 
-`Node ID`と`Compute Instance ID`は別identityです。
+Agent CommandはNode ID、MinecraftServer ID、Fencing Tokenを含みます。Agentはlocal accepted tokenより古いCommandを拒否します。
 
-## Lifecycle sketch
+## Akamai lifecycle
 
 ```text
 Requested
   → Provisioning
   → Bootstrapping
   → Enrolling
-  → Ready
+  → Available
   → Releasing
   → Deleting
   → Absent
 ```
 
-phase名は実装前にstate modelとともに確定し、phaseだけで細かなconditionを隠しません。
+provider create responseを失った場合はDeployment ID、Node ID、Operation IDに対応するmetadataでinventoryします。duplicateそのものを即Incidentにせず、ownedかつ安全にcleanupできる余剰resourceはOperationとして処理します。一意にcurrent resourceを決められない場合だけIncidentです。
+
+## Delete preconditions
+
+Akamai Compute Instance deleteには次を要求します。
+
+- stored Compute Instance IDが存在する
+- ownership metadataがDeployment IDとNode IDに一致する
+- active Allocationがない
+- MinecraftServer policyが要求するbackup Operationが成功済み
+- Node authorizationをdisable済み
+
+Delete responseを失った場合はsame IDをreadし、NotFoundならsuccessとします。
+
+## Non-responsibilities
+
+- Minecraft configuration
+- RCON command semantics
+- Server Home backup content
+- generic Node pool、bin packing、multi-server scheduling
+- arbitrary shell execution
