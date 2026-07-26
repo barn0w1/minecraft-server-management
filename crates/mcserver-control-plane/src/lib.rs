@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod application;
+pub mod client;
 pub mod config;
 pub mod domain;
 pub mod infrastructure;

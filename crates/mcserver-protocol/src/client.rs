@@ -8,6 +8,7 @@ pub mod method {
     pub const SERVER_CREATE: &str = "server.create";
     pub const SERVER_GET: &str = "server.get";
     pub const SERVER_LIST: &str = "server.list";
+    pub const SERVER_STATUS: &str = "server.status";
     pub const SERVER_SET_DESIRED_STATE: &str = "server.set_desired_state";
     pub const SERVER_INSTANCE_GET: &str = "server_instance.get";
     pub const SERVER_INSTANCE_LIST: &str = "server_instance.list";
@@ -24,6 +25,13 @@ pub enum DesiredState {
 #[serde(rename_all = "snake_case")]
 pub enum TerminalResult {
     Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeTerminalResult {
+    Deleted,
     Failed,
 }
 
@@ -91,13 +99,13 @@ pub struct ListServerInstancesParams {
     pub server_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PingResult {
-    pub status: &'static str,
-    pub version: &'static str,
+    pub status: String,
+    pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerResource {
     pub id: Uuid,
     pub name: String,
@@ -109,12 +117,12 @@ pub struct ServerResource {
     pub updated_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListServersResult {
     pub servers: Vec<ServerResource>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInstanceResource {
     pub id: Uuid,
     pub server_id: Uuid,
@@ -134,7 +142,29 @@ pub struct ServerInstanceResource {
     pub updated_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListServerInstancesResult {
     pub server_instances: Vec<ServerInstanceResource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputeInstanceResource {
+    pub id: Uuid,
+    pub server_instance_id: Uuid,
+    pub process_id: Option<u32>,
+    pub agent_connected_at_ms: Option<i64>,
+    pub shutdown_requested_at_ms: Option<i64>,
+    pub terminated_at_ms: Option<i64>,
+    pub terminal_result: Option<ComputeTerminalResult>,
+    pub failure_message: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerStatusResource {
+    pub server: ServerResource,
+    pub active_instance: Option<ServerInstanceResource>,
+    pub active_compute: Option<ComputeInstanceResource>,
+    pub agent_connected: bool,
 }

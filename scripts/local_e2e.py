@@ -9,6 +9,7 @@ from the snapshot published by the first one.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -76,6 +77,9 @@ def read_line(connection: socket.socket, maximum: int) -> bytes:
             raise RpcError("control plane disconnected before returning a response")
         newline = chunk.find(b"\n")
         if newline >= 0:
+            size += newline
+            if size > maximum:
+                raise RpcError(f"response exceeds {maximum} bytes")
             chunks.append(chunk[:newline])
             return b"".join(chunks)
         chunks.append(chunk)
@@ -84,10 +88,10 @@ def read_line(connection: socket.socket, maximum: int) -> bytes:
             raise RpcError(f"response exceeds {maximum} bytes")
 
 
-def ensure_restic_repository(repository: Path) -> None:
-    restic = shutil.which("restic")
+def ensure_restic_repository(repository: Path, restic_binary: str) -> None:
+    restic = shutil.which(restic_binary)
     if restic is None:
-        raise RpcError("restic is not available in PATH")
+        raise RpcError(f"restic binary is not available: {restic_binary}")
     if not any(
         os.environ.get(name)
         for name in ("RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
@@ -218,6 +222,106 @@ def wait_for_tcp_port(host: str, port: int, deadline: float) -> None:
     raise TimeoutError(f"timed out waiting for Minecraft TCP port {host}:{port}")
 
 
+def tcp_publish_port_is_available(port: int) -> bool:
+    addresses = [
+        (socket.AF_INET, ("0.0.0.0", port)),
+        (socket.AF_INET6, ("::", port, 0, 0)),
+    ]
+    checked = False
+    for family, address in addresses:
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind(address)
+            checked = True
+        except OSError as error:
+            if error.errno in {errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL}:
+                continue
+            return False
+    return checked
+
+
+def force_remove_test_containers(
+    podman_binary: str,
+    local_scope: str,
+    server_id: str,
+) -> None:
+    podman = shutil.which(podman_binary)
+    if podman is None:
+        print(
+            f"cleanup warning: Podman binary is not available: {podman_binary}",
+            file=sys.stderr,
+        )
+        return
+    result = subprocess.run(
+        [
+            podman,
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            "label=io.mcserver.managed=true",
+            "--filter",
+            f"label=io.mcserver.local-scope={local_scope}",
+            "--filter",
+            f"label=io.mcserver.server-id={server_id}",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"cleanup warning: failed to list test containers: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return
+    container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not container_ids:
+        return
+    removed = subprocess.run(
+        [podman, "rm", "--force", "--ignore", *container_ids],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if removed.returncode != 0:
+        print(
+            f"cleanup warning: failed to remove test containers: {removed.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
+def cleanup_failed_run(
+    client: JsonRpcClient,
+    server: dict[str, Any],
+    cleanup_deadline: float,
+    podman_binary: str,
+    local_scope: str,
+) -> None:
+    server_id = server["id"]
+    try:
+        current = client.call("server.get", {"server_id": server_id})
+        if current["desired_state"] != "stopped":
+            current = set_desired_state(client, current, "stopped")
+        instance = active_instance(client, server_id)
+        if instance is not None:
+            wait_for_completed_instance(
+                client,
+                server_id,
+                instance["id"],
+                cleanup_deadline,
+            )
+    except (OSError, RpcError, TimeoutError) as error:
+        print(
+            f"cleanup warning: graceful test cleanup failed: {error}",
+            file=sys.stderr,
+        )
+    finally:
+        force_remove_test_containers(podman_binary, local_scope, server_id)
+
+
 def set_desired_state(
     client: JsonRpcClient, server: dict[str, Any], desired_state: str
 ) -> dict[str, Any]:
@@ -290,7 +394,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--host-port", type=int, default=25565)
+    parser.add_argument("--stop-timeout-seconds", type=int, default=60)
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
+    parser.add_argument("--cleanup-timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--podman-binary",
+        default=os.environ.get("MCSERVER_CONTROL_PLANE_PODMAN_BINARY", "podman"),
+    )
+    parser.add_argument(
+        "--restic-binary",
+        default=os.environ.get("MCSERVER_NODE_AGENT_RESTIC_BINARY", "restic"),
+    )
+    parser.add_argument(
+        "--local-scope",
+        default=os.environ.get("MCSERVER_CONTROL_PLANE_LOCAL_SCOPE", "default"),
+    )
     parser.add_argument(
         "--name",
         default=None,
@@ -301,6 +419,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="only verify the Podman process observation, not Minecraft readiness",
     )
+    parser.add_argument(
+        "--leave-resources-on-failure",
+        action="store_true",
+        help="do not request stop or remove managed test containers after a failure",
+    )
     return parser.parse_args()
 
 
@@ -308,71 +431,111 @@ def main() -> int:
     args = parse_args()
     if not 1 <= args.host_port <= 65535:
         raise ValueError("--host-port must be between 1 and 65535")
+    if args.stop_timeout_seconds <= 0:
+        raise ValueError("--stop-timeout-seconds must be greater than zero")
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than zero")
+    if args.cleanup_timeout_seconds <= 0:
+        raise ValueError("--cleanup-timeout-seconds must be greater than zero")
+    if not args.local_scope.strip() or "\0" in args.local_scope:
+        raise ValueError("--local-scope must be non-blank and contain no NUL byte")
+    if len(args.local_scope) > 128:
+        raise ValueError("--local-scope must be no longer than 128 characters")
+    if not all(character.isascii() and (character.isalnum() or character in "._-") for character in args.local_scope):
+        raise ValueError(
+            "--local-scope must contain only ASCII letters, digits, dot, underscore, or hyphen"
+        )
+    if not tcp_publish_port_is_available(args.host_port):
+        raise RpcError(
+            f"host publish port {args.host_port} is unavailable; "
+            "stop the existing process or choose another --host-port"
+        )
+
     socket_path = args.socket.expanduser().resolve()
     repository = args.repository.expanduser().resolve()
-    ensure_restic_repository(repository)
+    ensure_restic_repository(repository, args.restic_binary)
     name = args.name or f"local-e2e-{int(time.time())}"
     deadline = time.monotonic() + args.timeout_seconds
     client = JsonRpcClient(socket_path, timeout_seconds=30.0)
+    server: dict[str, Any] | None = None
+    succeeded = False
 
-    ping = client.call("system.ping")
-    print(f"control plane status={ping['status']} version={ping['version']}")
-    server = client.call(
-        "server.create",
-        {
-            "name": name,
-            "spec": {
-                "compute": {"provider": "local"},
-                "process": {
-                    "container_image": "docker.io/itzg/minecraft-server:latest",
-                    "server_type": "VANILLA",
-                    "version": "LATEST",
-                    "host_port": args.host_port,
-                    "stop_timeout_seconds": 60,
-                    "accept_eula": True,
-                    "environment": {},
+    try:
+        ping = client.call("system.ping")
+        print(f"control plane status={ping['status']} version={ping['version']}")
+        server = client.call(
+            "server.create",
+            {
+                "name": name,
+                "spec": {
+                    "compute": {"provider": "local"},
+                    "process": {
+                        "container_image": "docker.io/itzg/minecraft-server:latest",
+                        "server_type": "VANILLA",
+                        "version": "LATEST",
+                        "host_port": args.host_port,
+                        "stop_timeout_seconds": args.stop_timeout_seconds,
+                        "accept_eula": True,
+                        "environment": {},
+                    },
+                    "data": {"repository": str(repository)},
                 },
-                "data": {"repository": str(repository)},
             },
-        },
-    )
-    print(f"created server={server['id']} name={server['name']}")
+        )
+        print(f"created server={server['id']} name={server['name']}")
 
-    server, first = run_cycle(
-        client,
-        server,
-        previous_instance_id=None,
-        expected_source_snapshot=None,
-        host=args.host,
-        port=args.host_port,
-        deadline=deadline,
-        wait_for_port=not args.skip_port_check,
-    )
-    first_snapshot = first["result_snapshot_id"]
+        server, first = run_cycle(
+            client,
+            server,
+            previous_instance_id=None,
+            expected_source_snapshot=None,
+            host=args.host,
+            port=args.host_port,
+            deadline=deadline,
+            wait_for_port=not args.skip_port_check,
+        )
+        first_snapshot = first["result_snapshot_id"]
 
-    server, second = run_cycle(
-        client,
-        server,
-        previous_instance_id=first["id"],
-        expected_source_snapshot=first_snapshot,
-        host=args.host,
-        port=args.host_port,
-        deadline=deadline,
-        wait_for_port=not args.skip_port_check,
-    )
-    if second["fencing_token"] <= first["fencing_token"]:
-        raise RpcError("fencing token did not increase between instances")
+        server, second = run_cycle(
+            client,
+            server,
+            previous_instance_id=first["id"],
+            expected_source_snapshot=first_snapshot,
+            host=args.host,
+            port=args.host_port,
+            deadline=deadline,
+            wait_for_port=not args.skip_port_check,
+        )
+        if second["fencing_token"] <= first["fencing_token"]:
+            raise RpcError("fencing token did not increase between instances")
 
-    print(
-        "local vertical slice passed: create, restore, start, stop, snapshot, "
-        "publish, and second-generation restore all succeeded"
-    )
-    return 0
+        print(
+            "local vertical slice passed: create, restore, start, stop, snapshot, "
+            "publish, and second-generation restore all succeeded"
+        )
+        succeeded = True
+        return 0
+    finally:
+        if (
+            not succeeded
+            and server is not None
+            and not args.leave_resources_on_failure
+        ):
+            cleanup_failed_run(
+                client,
+                server,
+                time.monotonic() + args.cleanup_timeout_seconds,
+                args.podman_binary,
+                args.local_scope,
+            )
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("local E2E interrupted", file=sys.stderr)
+        raise SystemExit(130) from None
     except (OSError, RpcError, TimeoutError, ValueError) as error:
         print(f"local E2E failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

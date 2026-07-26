@@ -10,6 +10,8 @@ const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_RESTIC_RETRY_LOCK_SECONDS: u64 = 300;
 const DEFAULT_RECONNECT_MIN_SECONDS: u64 = 1;
 const DEFAULT_RECONNECT_MAX_SECONDS: u64 = 30;
+const DEFAULT_LOCAL_SCOPE: &str = "default";
+const MAX_LOCAL_SCOPE_CHARS: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -17,6 +19,7 @@ pub struct Config {
     pub compute_instance_id: Uuid,
     pub connection_token: String,
     pub state_directory: PathBuf,
+    pub local_scope: String,
     pub podman_binary: PathBuf,
     pub restic_binary: PathBuf,
     pub max_frame_bytes: usize,
@@ -47,6 +50,10 @@ impl Config {
             ));
         }
         let state_directory = PathBuf::from(required("MCSERVER_NODE_AGENT_STATE_DIRECTORY")?);
+        let local_scope = optional_non_blank(
+            "MCSERVER_NODE_AGENT_LOCAL_SCOPE",
+            DEFAULT_LOCAL_SCOPE,
+        )?;
         let podman_binary = env::var_os("MCSERVER_NODE_AGENT_PODMAN_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
@@ -82,6 +89,7 @@ impl Config {
             compute_instance_id,
             connection_token,
             state_directory,
+            local_scope,
             podman_binary,
             restic_binary,
             max_frame_bytes,
@@ -91,6 +99,33 @@ impl Config {
             reconnect_max,
         })
     }
+}
+
+fn optional_non_blank(name: &'static str, default: &str) -> Result<String, ConfigError> {
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => default.to_owned(),
+        Err(source) => return Err(ConfigError::Environment { name, source }),
+    };
+    if value.trim().is_empty() {
+        return Err(ConfigError::BlankValue(name));
+    }
+    if value.contains('\0') {
+        return Err(ConfigError::NulByte(name));
+    }
+    if value.chars().count() > MAX_LOCAL_SCOPE_CHARS {
+        return Err(ConfigError::ValueTooLong {
+            name,
+            maximum: MAX_LOCAL_SCOPE_CHARS,
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ConfigError::InvalidLocalScope(value));
+    }
+    Ok(value)
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
@@ -147,6 +182,12 @@ pub enum ConfigError {
     },
     #[error("{0} must not be blank")]
     BlankValue(&'static str),
+    #[error("{0} must not contain a NUL byte")]
+    NulByte(&'static str),
+    #[error("{name} must be no longer than {maximum} characters")]
+    ValueTooLong { name: &'static str, maximum: usize },
+    #[error("local scope must contain only ASCII letters, digits, dot, underscore, or hyphen: {0}")]
+    InvalidLocalScope(String),
     #[error("{name} must be an integer, got {value}")]
     InvalidInteger {
         name: &'static str,

@@ -46,6 +46,13 @@ const SELECT_ACTIVE_FOR_INSTANCE: &str = r#"
     WHERE server_instance_id = ? AND terminated_at_ms IS NULL
 "#;
 
+const SELECT_ACTIVE_OWNERSHIP: &str = r#"
+    SELECT id, server_instance_id
+    FROM compute_instances
+    WHERE terminated_at_ms IS NULL
+    ORDER BY id
+"#;
+
 #[derive(Debug, Clone)]
 pub struct ComputeInstanceRepository {
     pool: SqlitePool,
@@ -125,6 +132,25 @@ impl ComputeInstanceRepository {
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(decode_compute_instance).transpose()
+    }
+
+    pub async fn list_active_ownership(
+        &self,
+    ) -> Result<Vec<(ComputeInstanceId, ServerInstanceId)>, RepositoryError> {
+        let rows = sqlx::query(SELECT_ACTIVE_OWNERSHIP)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let compute_id = decode_uuid(row.try_get::<String, _>("id")?)?;
+                let server_instance_id =
+                    decode_uuid(row.try_get::<String, _>("server_instance_id")?)?;
+                Ok((
+                    ComputeInstanceId::from_uuid(compute_id),
+                    ServerInstanceId::from_uuid(server_instance_id),
+                ))
+            })
+            .collect()
     }
 
     pub async fn record_process_id(

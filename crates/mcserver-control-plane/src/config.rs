@@ -14,6 +14,11 @@ const DEFAULT_AGENT_COMMAND_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_NODE_AGENT_BINARY: &str = "mcserver-node-agent";
 const DEFAULT_NODE_AGENT_ROOT: &str = "/var/lib/mcserver/local-agents";
 const DEFAULT_LOCAL_PROCESS_STOP_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_LOCAL_CONTROL_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_PODMAN_BINARY: &str = "podman";
+const DEFAULT_LOCAL_SCOPE: &str = "default";
+const MAX_LOCAL_SCOPE_CHARS: usize = 128;
+const DEFAULT_REAP_ORPHANS_ON_START: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -28,6 +33,10 @@ pub struct Config {
     pub agent_command_timeout: Duration,
     pub node_agent_binary: PathBuf,
     pub node_agent_root: PathBuf,
+    pub podman_binary: PathBuf,
+    pub local_scope: String,
+    pub reap_orphans_on_start: bool,
+    pub local_control_timeout: Duration,
     pub local_process_stop_timeout: Duration,
 }
 
@@ -80,6 +89,21 @@ impl Config {
         let node_agent_root = env::var_os("MCSERVER_CONTROL_PLANE_NODE_AGENT_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_NODE_AGENT_ROOT));
+        let podman_binary = env::var_os("MCSERVER_CONTROL_PLANE_PODMAN_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
+        let local_scope = optional_non_blank(
+            "MCSERVER_CONTROL_PLANE_LOCAL_SCOPE",
+            DEFAULT_LOCAL_SCOPE,
+        )?;
+        let reap_orphans_on_start = parse_bool(
+            "MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START",
+            DEFAULT_REAP_ORPHANS_ON_START,
+        )?;
+        let local_control_timeout = parse_positive_duration(
+            "MCSERVER_CONTROL_PLANE_LOCAL_CONTROL_TIMEOUT_SECONDS",
+            DEFAULT_LOCAL_CONTROL_TIMEOUT_SECONDS,
+        )?;
         let local_process_stop_timeout = parse_positive_duration(
             "MCSERVER_CONTROL_PLANE_LOCAL_PROCESS_STOP_TIMEOUT_SECONDS",
             DEFAULT_LOCAL_PROCESS_STOP_TIMEOUT_SECONDS,
@@ -97,8 +121,47 @@ impl Config {
             agent_command_timeout,
             node_agent_binary,
             node_agent_root,
+            podman_binary,
+            local_scope,
+            reap_orphans_on_start,
+            local_control_timeout,
             local_process_stop_timeout,
         })
+    }
+}
+
+fn optional_non_blank(name: &'static str, default: &str) -> Result<String, ConfigError> {
+    let value = optional_string(name, default)?;
+    if value.trim().is_empty() {
+        return Err(ConfigError::BlankValue(name));
+    }
+    if value.contains('\0') {
+        return Err(ConfigError::NulByte(name));
+    }
+    if value.chars().count() > MAX_LOCAL_SCOPE_CHARS {
+        return Err(ConfigError::ValueTooLong {
+            name,
+            maximum: MAX_LOCAL_SCOPE_CHARS,
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ConfigError::InvalidLocalScope(value));
+    }
+    Ok(value)
+}
+
+fn parse_bool(name: &'static str, default: bool) -> Result<bool, ConfigError> {
+    match env::var(name) {
+        Ok(value) => match value.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Ok(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Ok(false),
+            _ => Err(ConfigError::InvalidBoolean { name, value }),
+        },
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(source) => Err(ConfigError::Environment { name, source }),
     }
 }
 
@@ -190,6 +253,16 @@ pub enum ConfigError {
     SocketModeOutOfRange(u32),
     #[error("{0} must be greater than zero")]
     ZeroValue(&'static str),
+    #[error("{0} must not be blank")]
+    BlankValue(&'static str),
+    #[error("{0} must not contain a NUL byte")]
+    NulByte(&'static str),
+    #[error("{name} must be no longer than {maximum} characters")]
+    ValueTooLong { name: &'static str, maximum: usize },
+    #[error("local scope must contain only ASCII letters, digits, dot, underscore, or hyphen: {0}")]
+    InvalidLocalScope(String),
+    #[error("{name} must be a boolean, got {value}")]
+    InvalidBoolean { name: &'static str, value: String },
     #[error("agent listen address is invalid")]
     InvalidSocketAddress(#[source] std::net::AddrParseError),
     #[error("local agent listen address must be loopback, got {0}")]

@@ -1,8 +1,9 @@
 use mcserver_protocol::{
     client::{
-        self, CreateServerParams, GetServerInstanceParams, GetServerParams,
-        ListServerInstancesParams, ListServerInstancesResult, ListServersResult, PingResult,
-        ServerInstanceResource, ServerResource, SetServerDesiredStateParams,
+        self, ComputeInstanceResource, CreateServerParams, GetServerInstanceParams,
+        GetServerParams, ListServerInstancesParams, ListServerInstancesResult, ListServersResult,
+        PingResult, ServerInstanceResource, ServerResource, ServerStatusResource,
+        SetServerDesiredStateParams,
     },
     json_rpc::{self, ErrorObject, Request, Response},
 };
@@ -11,10 +12,12 @@ use serde_json::{Value, json};
 use tracing::error;
 
 use crate::{
-    application::{ApplicationError, ServerInstanceService, ServerService},
+    application::{
+        ApplicationError, ServerInstanceService, ServerService, ServerStatus, ServerStatusService,
+    },
     domain::{
-        ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerInstance,
-        ServerInstanceId, ServerSpec, TerminalResult,
+        ComputeInstance, ComputeSpec, ComputeTerminalResult, DataSpec, DesiredState, ProcessSpec,
+        Server, ServerId, ServerInstance, ServerInstanceId, ServerSpec, TerminalResult,
     },
 };
 
@@ -22,6 +25,7 @@ use crate::{
 pub struct ClientRpcHandler {
     server_service: ServerService,
     server_instance_service: ServerInstanceService,
+    server_status_service: ServerStatusService,
 }
 
 impl ClientRpcHandler {
@@ -29,10 +33,12 @@ impl ClientRpcHandler {
     pub fn new(
         server_service: ServerService,
         server_instance_service: ServerInstanceService,
+        server_status_service: ServerStatusService,
     ) -> Self {
         Self {
             server_service,
             server_instance_service,
+            server_status_service,
         }
     }
 
@@ -127,8 +133,8 @@ impl ClientRpcHandler {
             client::method::SYSTEM_PING => {
                 require_no_params(&params)?;
                 to_value(PingResult {
-                    status: "ok",
-                    version: env!("CARGO_PKG_VERSION"),
+                    status: "ok".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
                 })
             }
             client::method::SERVER_CREATE => {
@@ -157,6 +163,14 @@ impl ClientRpcHandler {
                     .map(protocol_server)
                     .collect();
                 to_value(ListServersResult { servers })
+            }
+            client::method::SERVER_STATUS => {
+                let params = parse_params::<GetServerParams>(params)?;
+                let status = self
+                    .server_status_service
+                    .get(ServerId::from_uuid(params.server_id))
+                    .await?;
+                to_value(protocol_server_status(status))
             }
             client::method::SERVER_SET_DESIRED_STATE => {
                 let params = parse_params::<SetServerDesiredStateParams>(params)?;
@@ -316,6 +330,43 @@ fn protocol_server_instance(instance: ServerInstance) -> ServerInstanceResource 
         terminal_result: instance.terminal_result.map(protocol_terminal_result),
         created_at_ms: instance.created_at.as_millis(),
         updated_at_ms: instance.updated_at.as_millis(),
+    }
+}
+
+fn protocol_compute_instance(compute: ComputeInstance) -> ComputeInstanceResource {
+    ComputeInstanceResource {
+        id: compute.id.as_uuid(),
+        server_instance_id: compute.server_instance_id.as_uuid(),
+        process_id: compute.process_id,
+        agent_connected_at_ms: compute.agent_connected_at.map(|value| value.as_millis()),
+        shutdown_requested_at_ms: compute
+            .shutdown_requested_at
+            .map(|value| value.as_millis()),
+        terminated_at_ms: compute.terminated_at.map(|value| value.as_millis()),
+        terminal_result: compute
+            .terminal_result
+            .map(protocol_compute_terminal_result),
+        failure_message: compute.failure_message,
+        created_at_ms: compute.created_at.as_millis(),
+        updated_at_ms: compute.updated_at.as_millis(),
+    }
+}
+
+fn protocol_server_status(status: ServerStatus) -> ServerStatusResource {
+    ServerStatusResource {
+        server: protocol_server(status.server),
+        active_instance: status.active_instance.map(protocol_server_instance),
+        active_compute: status.active_compute.map(protocol_compute_instance),
+        agent_connected: status.agent_connected,
+    }
+}
+
+const fn protocol_compute_terminal_result(
+    result: ComputeTerminalResult,
+) -> client::ComputeTerminalResult {
+    match result {
+        ComputeTerminalResult::Deleted => client::ComputeTerminalResult::Deleted,
+        ComputeTerminalResult::Failed => client::ComputeTerminalResult::Failed,
     }
 }
 

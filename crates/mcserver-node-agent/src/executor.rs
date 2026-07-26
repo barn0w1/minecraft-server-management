@@ -25,6 +25,11 @@ const AGENT_STATE_SCHEMA_VERSION: u32 = 1;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 const MAX_SNAPSHOT_ID_CHARS: usize = 256;
+const MANAGED_LABEL: &str = "io.mcserver.managed";
+const LOCAL_SCOPE_LABEL: &str = "io.mcserver.local-scope";
+const SERVER_ID_LABEL: &str = "io.mcserver.server-id";
+const SERVER_INSTANCE_ID_LABEL: &str = "io.mcserver.server-instance-id";
+const COMPUTE_INSTANCE_ID_LABEL: &str = "io.mcserver.compute-instance-id";
 
 #[derive(Debug, Clone)]
 pub struct AgentExecutor {
@@ -119,10 +124,15 @@ impl AgentExecutor {
             return Ok(ChangedResult { changed: false });
         }
 
+        let server_id = instance.server_id;
         self.remove_container(params.instance.server_instance_id)
             .await?;
-        self.create_container(params.instance.server_instance_id, &params.process)
-            .await?;
+        self.create_container(
+            params.instance.server_instance_id,
+            server_id,
+            &params.process,
+        )
+        .await?;
         self.run_podman(
             ["start", &container_name(params.instance.server_instance_id)],
             None,
@@ -350,6 +360,7 @@ impl AgentExecutor {
     async fn create_container(
         &self,
         server_instance_id: Uuid,
+        server_id: Uuid,
         process: &ProcessSpec,
     ) -> Result<(), ExecutorError> {
         if !process.accept_eula {
@@ -366,7 +377,18 @@ impl AgentExecutor {
             .arg("--name")
             .arg(&name)
             .arg("--label")
-            .arg(format!("io.mcserver.server-instance={server_instance_id}"))
+            .arg(format!("{MANAGED_LABEL}=true"))
+            .arg("--label")
+            .arg(format!("{LOCAL_SCOPE_LABEL}={}", self.config.local_scope))
+            .arg("--label")
+            .arg(format!("{SERVER_ID_LABEL}={server_id}"))
+            .arg("--label")
+            .arg(format!("{SERVER_INSTANCE_ID_LABEL}={server_instance_id}"))
+            .arg("--label")
+            .arg(format!(
+                "{COMPUTE_INSTANCE_ID_LABEL}={}",
+                self.config.compute_instance_id
+            ))
             .arg("--publish")
             .arg(publish)
             .arg("--volume")

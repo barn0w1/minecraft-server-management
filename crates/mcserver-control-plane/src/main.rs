@@ -2,11 +2,11 @@ use std::{error::Error, fmt::Display, time::Duration};
 
 use mcserver_control_plane::{
     agent::{AgentRegistry, AgentServer, AgentServerError},
-    application::{ServerInstanceService, ServerService},
+    application::{ServerInstanceService, ServerService, ServerStatusService},
     config::Config,
     infrastructure::{
-        ComputeInstanceRepository, LocalComputeManager, ServerInstanceRepository, ServerRepository,
-        SnapshotRepository, connect_database,
+        ComputeInstanceRepository, LocalComputeError, LocalComputeManager,
+        ServerInstanceRepository, ServerRepository, SnapshotRepository, connect_database,
     },
     interface::{ClientRpcHandler, UnixSocketError, UnixSocketServer},
     reconciliation::{ReconcileFatalError, ReconcileWorker},
@@ -45,11 +45,32 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         agents.clone(),
         config.node_agent_binary.clone(),
         config.node_agent_root.clone(),
+        config.podman_binary.clone(),
+        config.local_scope.clone(),
         config.agent_listen_address.to_string(),
         config.agent_command_timeout,
         config.max_frame_bytes,
+        config.local_control_timeout,
         config.local_process_stop_timeout,
     );
+    if config.reap_orphans_on_start {
+        let active_compute_ownership = compute_repository.list_active_ownership().await?;
+        let summary = local_compute
+            .reap_orphans(&active_compute_ownership)
+            .await?;
+        if summary.containers_removed > 0
+            || summary.processes_stopped > 0
+            || summary.state_directories_removed > 0
+        {
+            info!(
+                containers_removed = summary.containers_removed,
+                processes_stopped = summary.processes_stopped,
+                state_directories_removed = summary.state_directories_removed,
+                "reaped orphaned local runtime resources"
+            );
+        }
+    }
+
     let (reconcile_scheduler, reconcile_worker) = ReconcileWorker::channel(
         server_repository.clone(),
         instance_repository.clone(),
@@ -62,9 +83,19 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         config.agent_command_timeout,
     );
 
+    let server_status_service = ServerStatusService::new(
+        server_repository.clone(),
+        instance_repository.clone(),
+        compute_repository.clone(),
+        agents.clone(),
+    );
     let server_service = ServerService::new(server_repository, reconcile_scheduler.clone());
     let server_instance_service = ServerInstanceService::new(instance_repository);
-    let rpc_handler = ClientRpcHandler::new(server_service, server_instance_service);
+    let rpc_handler = ClientRpcHandler::new(
+        server_service,
+        server_instance_service,
+        server_status_service,
+    );
 
     let agent_server = AgentServer::bind(
         config.agent_listen_address,
@@ -218,6 +249,8 @@ impl Display for ServiceName {
 enum ControlPlaneError {
     #[error("database operation failed")]
     Repository(#[from] mcserver_control_plane::infrastructure::RepositoryError),
+    #[error("local compute operation failed: {0}")]
+    LocalCompute(#[from] LocalComputeError),
     #[error("client JSON-RPC socket failed")]
     Socket(#[from] UnixSocketError),
     #[error("node-agent JSON-RPC listener failed")]
