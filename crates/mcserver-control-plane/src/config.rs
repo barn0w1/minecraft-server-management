@@ -7,6 +7,7 @@ const DEFAULT_DATABASE_URL: &str = "sqlite:///var/lib/mcserver/control-plane.db?
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const DEFAULT_RECONCILE_INTERVAL_SECONDS: u64 = 30;
+const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u64 = 15;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -15,6 +16,7 @@ pub struct Config {
     pub socket_mode: u32,
     pub max_frame_bytes: usize,
     pub reconcile_interval: Duration,
+    pub shutdown_timeout: Duration,
 }
 
 impl Config {
@@ -33,6 +35,10 @@ impl Config {
             "MCSERVER_CONTROL_PLANE_RECONCILE_INTERVAL_SECONDS",
             DEFAULT_RECONCILE_INTERVAL_SECONDS,
         )?;
+        let shutdown_timeout_seconds = parse_u64(
+            "MCSERVER_CONTROL_PLANE_SHUTDOWN_TIMEOUT_SECONDS",
+            DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        )?;
 
         if max_frame_bytes == 0 {
             return Err(ConfigError::ZeroValue(
@@ -44,6 +50,11 @@ impl Config {
                 "MCSERVER_CONTROL_PLANE_RECONCILE_INTERVAL_SECONDS",
             ));
         }
+        if shutdown_timeout_seconds == 0 {
+            return Err(ConfigError::ZeroValue(
+                "MCSERVER_CONTROL_PLANE_SHUTDOWN_TIMEOUT_SECONDS",
+            ));
+        }
 
         Ok(Self {
             socket_path,
@@ -51,6 +62,7 @@ impl Config {
             socket_mode,
             max_frame_bytes,
             reconcile_interval: Duration::from_secs(reconcile_interval_seconds),
+            shutdown_timeout: Duration::from_secs(shutdown_timeout_seconds),
         })
     }
 }

@@ -1,12 +1,13 @@
 use std::{
     collections::BTreeMap,
     fmt::{Display, Formatter},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::{TimestampError, UnixTimestampMillis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -155,14 +156,14 @@ pub struct Server {
     pub generation: u64,
     pub desired_state: DesiredState,
     pub spec: ServerSpec,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
+    pub created_at: UnixTimestampMillis,
+    pub updated_at: UnixTimestampMillis,
 }
 
 impl Server {
     pub fn new(name: ServerName, spec: ServerSpec) -> Result<Self, ValidationError> {
         spec.validate()?;
-        let now = unix_time_millis()?;
+        let now = UnixTimestampMillis::now()?;
 
         Ok(Self {
             id: ServerId::new(),
@@ -170,8 +171,8 @@ impl Server {
             generation: 1,
             desired_state: DesiredState::Stopped,
             spec,
-            created_at_ms: now,
-            updated_at_ms: now,
+            created_at: now,
+            updated_at: now,
         })
     }
 
@@ -182,11 +183,14 @@ impl Server {
         generation: u64,
         desired_state: DesiredState,
         spec: ServerSpec,
-        created_at_ms: i64,
-        updated_at_ms: i64,
+        created_at: UnixTimestampMillis,
+        updated_at: UnixTimestampMillis,
     ) -> Result<Self, ValidationError> {
         if generation == 0 {
             return Err(ValidationError::ZeroGeneration);
+        }
+        if updated_at < created_at {
+            return Err(ValidationError::InvalidTimestampOrder);
         }
         spec.validate()?;
 
@@ -196,8 +200,8 @@ impl Server {
             generation,
             desired_state,
             spec,
-            created_at_ms,
-            updated_at_ms,
+            created_at,
+            updated_at,
         })
     }
 
@@ -214,7 +218,7 @@ impl Server {
             .generation
             .checked_add(1)
             .ok_or(ValidationError::GenerationOverflow)?;
-        self.updated_at_ms = unix_time_millis()?;
+        self.updated_at = std::cmp::max(self.updated_at, UnixTimestampMillis::now()?);
         Ok(true)
     }
 }
@@ -224,14 +228,6 @@ fn require_non_blank(field: &'static str, value: &str) -> Result<(), ValidationE
         return Err(ValidationError::BlankField(field));
     }
     Ok(())
-}
-
-fn unix_time_millis() -> Result<i64, ValidationError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ValidationError::SystemClockBeforeUnixEpoch)?;
-
-    i64::try_from(duration.as_millis()).map_err(|_| ValidationError::TimestampOverflow)
 }
 
 #[derive(Debug, Error)]
@@ -246,10 +242,10 @@ pub enum ValidationError {
     ZeroGeneration,
     #[error("server generation overflowed")]
     GenerationOverflow,
-    #[error("system clock is before the Unix epoch")]
-    SystemClockBeforeUnixEpoch,
-    #[error("timestamp cannot be represented as i64 milliseconds")]
-    TimestampOverflow,
+    #[error("server timestamps are not in chronological order")]
+    InvalidTimestampOrder,
+    #[error("system clock timestamp is invalid")]
+    Timestamp(#[from] TimestampError),
     #[error("invalid persisted value for {field}: {value}")]
     InvalidPersistedValue { field: &'static str, value: String },
 }

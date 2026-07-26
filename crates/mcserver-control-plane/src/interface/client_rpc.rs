@@ -1,7 +1,8 @@
 use mcserver_protocol::{
     client::{
-        self, CreateServerParams, GetServerParams, ListServersResult, PingResult, ServerResource,
-        SetServerDesiredStateParams,
+        self, CreateServerParams, GetServerInstanceParams, GetServerParams,
+        ListServerInstancesParams, ListServerInstancesResult, ListServersResult, PingResult,
+        ServerInstanceResource, ServerResource, SetServerDesiredStateParams,
     },
     json_rpc::{self, ErrorObject, Request, Response},
 };
@@ -10,19 +11,29 @@ use serde_json::{Value, json};
 use tracing::error;
 
 use crate::{
-    application::{ApplicationError, ServerService},
-    domain::{ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerSpec},
+    application::{ApplicationError, ServerInstanceService, ServerService},
+    domain::{
+        ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerInstance,
+        ServerInstanceId, ServerSpec, TerminalResult,
+    },
 };
 
 #[derive(Debug, Clone)]
 pub struct ClientRpcHandler {
     server_service: ServerService,
+    server_instance_service: ServerInstanceService,
 }
 
 impl ClientRpcHandler {
     #[must_use]
-    pub fn new(server_service: ServerService) -> Self {
-        Self { server_service }
+    pub fn new(
+        server_service: ServerService,
+        server_instance_service: ServerInstanceService,
+    ) -> Self {
+        Self {
+            server_service,
+            server_instance_service,
+        }
     }
 
     pub async fn handle_json(&self, input: &str) -> Option<Value> {
@@ -159,6 +170,25 @@ impl ClientRpcHandler {
                     .await?;
                 to_value(protocol_server(server))
             }
+            client::method::SERVER_INSTANCE_GET => {
+                let params = parse_params::<GetServerInstanceParams>(params)?;
+                let instance = self
+                    .server_instance_service
+                    .get(ServerInstanceId::from_uuid(params.server_instance_id))
+                    .await?;
+                to_value(protocol_server_instance(instance))
+            }
+            client::method::SERVER_INSTANCE_LIST => {
+                let params = parse_params::<ListServerInstancesParams>(params)?;
+                let server_instances = self
+                    .server_instance_service
+                    .list_for_server(ServerId::from_uuid(params.server_id))
+                    .await?
+                    .into_iter()
+                    .map(protocol_server_instance)
+                    .collect();
+                to_value(ListServerInstancesResult { server_instances })
+            }
             _ => Err(RpcDispatchError::MethodNotFound),
         }
     }
@@ -260,8 +290,30 @@ fn protocol_server(server: Server) -> ServerResource {
         generation: server.generation,
         desired_state: protocol_desired_state(server.desired_state),
         spec: protocol_spec(server.spec),
-        created_at_ms: server.created_at_ms,
-        updated_at_ms: server.updated_at_ms,
+        created_at_ms: server.created_at.as_millis(),
+        updated_at_ms: server.updated_at.as_millis(),
+    }
+}
+
+fn protocol_server_instance(instance: ServerInstance) -> ServerInstanceResource {
+    ServerInstanceResource {
+        id: instance.id.as_uuid(),
+        server_id: instance.server_id.as_uuid(),
+        server_generation: instance.server_generation,
+        resolved_spec: protocol_spec(instance.resolved_spec),
+        fencing_token: instance.fencing_token,
+        stop_requested_at_ms: instance.stop_requested_at.map(|value| value.as_millis()),
+        terminated_at_ms: instance.terminated_at.map(|value| value.as_millis()),
+        terminal_result: instance.terminal_result.map(protocol_terminal_result),
+        created_at_ms: instance.created_at.as_millis(),
+        updated_at_ms: instance.updated_at.as_millis(),
+    }
+}
+
+const fn protocol_terminal_result(result: TerminalResult) -> client::TerminalResult {
+    match result {
+        TerminalResult::Completed => client::TerminalResult::Completed,
+        TerminalResult::Failed => client::TerminalResult::Failed,
     }
 }
 
@@ -294,6 +346,10 @@ impl RpcDispatchError {
             Self::Application(ApplicationError::NotFound) => {
                 ErrorObject::new(json_rpc::error_code::NOT_FOUND, "Server not found")
             }
+            Self::Application(ApplicationError::ServerInstanceNotFound) => ErrorObject::new(
+                json_rpc::error_code::NOT_FOUND,
+                "Server instance not found",
+            ),
             Self::Application(
                 error @ (ApplicationError::GenerationConflict { .. }
                 | ApplicationError::ConcurrentUpdate

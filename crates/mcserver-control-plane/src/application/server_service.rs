@@ -88,6 +88,8 @@ pub enum ApplicationError {
     Validation(#[from] ValidationError),
     #[error("server not found")]
     NotFound,
+    #[error("server instance not found")]
+    ServerInstanceNotFound,
     #[error("generation conflict: expected {expected:?}, actual {actual}")]
     GenerationConflict { expected: Option<u64>, actual: u64 },
     #[error("server was updated concurrently")]

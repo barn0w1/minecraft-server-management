@@ -2,7 +2,9 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::domain::{DesiredState, Server, ServerId, ServerName, ServerSpec, ValidationError};
+use crate::domain::{
+    DesiredState, Server, ServerId, ServerName, ServerSpec, UnixTimestampMillis, ValidationError,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServerRepository {
@@ -35,8 +37,8 @@ impl ServerRepository {
         .bind(generation_to_i64(server.generation)?)
         .bind(server.desired_state.as_str())
         .bind(spec_json)
-        .bind(server.created_at_ms)
-        .bind(server.updated_at_ms)
+        .bind(server.created_at.as_millis())
+        .bind(server.updated_at.as_millis())
         .execute(&self.pool)
         .await;
 
@@ -92,7 +94,7 @@ impl ServerRepository {
         )
         .bind(server.desired_state.as_str())
         .bind(generation_to_i64(server.generation)?)
-        .bind(server.updated_at_ms)
+        .bind(server.updated_at.as_millis())
         .bind(server.id.to_string())
         .bind(generation_to_i64(previous_generation)?)
         .execute(&self.pool)
@@ -113,8 +115,8 @@ fn decode_server(row: &SqliteRow) -> Result<Server, RepositoryError> {
     let desired_state = DesiredState::parse(&desired_state)?;
     let spec_json = row.try_get::<String, _>("spec_json")?;
     let spec = serde_json::from_str::<ServerSpec>(&spec_json)?;
-    let created_at_ms = row.try_get("created_at_ms")?;
-    let updated_at_ms = row.try_get("updated_at_ms")?;
+    let created_at = decode_timestamp(row.try_get("created_at_ms")?)?;
+    let updated_at = decode_timestamp(row.try_get("updated_at_ms")?)?;
 
     Server::rehydrate(
         id,
@@ -122,10 +124,14 @@ fn decode_server(row: &SqliteRow) -> Result<Server, RepositoryError> {
         generation,
         desired_state,
         spec,
-        created_at_ms,
-        updated_at_ms,
+        created_at,
+        updated_at,
     )
     .map_err(RepositoryError::from)
+}
+
+fn decode_timestamp(value: i64) -> Result<UnixTimestampMillis, RepositoryError> {
+    UnixTimestampMillis::from_millis(value).map_err(RepositoryError::from)
 }
 
 fn generation_to_i64(generation: u64) -> Result<i64, RepositoryError> {
@@ -153,10 +159,16 @@ pub enum RepositoryError {
     Serialization(#[from] serde_json::Error),
     #[error("persisted server data is invalid")]
     Validation(#[from] ValidationError),
+    #[error("persisted timestamp is invalid")]
+    Timestamp(#[from] crate::domain::TimestampError),
+    #[error("persisted server instance data is invalid")]
+    ServerInstanceValidation(#[from] crate::domain::ServerInstanceValidationError),
     #[error("persisted server data is corrupt: {0}")]
     CorruptData(String),
     #[error("server generation is outside the supported range")]
     GenerationOutOfRange,
+    #[error("persisted integer is outside the supported positive 64-bit range")]
+    IntegerOutOfRange,
     #[error("resource conflict: {0}")]
     Conflict(&'static str),
 }

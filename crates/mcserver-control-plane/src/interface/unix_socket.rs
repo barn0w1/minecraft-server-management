@@ -10,6 +10,7 @@ use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::watch,
+    task::JoinSet,
 };
 use tracing::{debug, error, info, warn};
 
@@ -46,29 +47,57 @@ impl UnixSocketServer {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), UnixSocketError> {
         let socket_path = self.socket_path.clone();
         let _guard = SocketPathGuard::new(socket_path);
+        let mut connections = JoinSet::new();
 
-        loop {
+        let accept_result = loop {
+            if *shutdown.borrow() {
+                break Ok(());
+            }
+            let has_connections = !connections.is_empty();
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        break;
+                        break Ok(());
                     }
                 }
                 accepted = self.listener.accept() => {
-                    let (stream, address) = accepted?;
+                    let (stream, address) = match accepted {
+                        Ok(value) => value,
+                        Err(error) => break Err(UnixSocketError::Io(error)),
+                    };
                     debug!(?address, "accepted client JSON-RPC connection");
                     let handler = self.handler.clone();
                     let max_frame_bytes = self.max_frame_bytes;
-                    tokio::spawn(async move {
-                        if let Err(error) = handle_connection(stream, handler, max_frame_bytes).await {
+                    let connection_shutdown = shutdown.clone();
+                    connections.spawn(async move {
+                        if let Err(error) = handle_connection(
+                            stream,
+                            handler,
+                            max_frame_bytes,
+                            connection_shutdown,
+                        )
+                        .await
+                        {
                             warn!(%error, "client JSON-RPC connection closed with an error");
                         }
                     });
                 }
+                completed = connections.join_next(), if has_connections => {
+                    if let Some(Err(error)) = completed {
+                        warn!(%error, "client JSON-RPC connection task failed");
+                    }
+                }
+            }
+        };
+
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                warn!(%error, "client JSON-RPC connection task failed during shutdown");
             }
         }
 
-        Ok(())
+        info!("client JSON-RPC socket server stopped");
+        accept_result
     }
 }
 
@@ -76,13 +105,25 @@ async fn handle_connection(
     stream: UnixStream,
     handler: ClientRpcHandler,
     max_frame_bytes: usize,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), UnixSocketError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut frame = Vec::new();
 
     loop {
-        let read = read_frame(&mut reader, &mut frame, max_frame_bytes).await?;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        let read = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+                continue;
+            }
+            read = read_frame(&mut reader, &mut frame, max_frame_bytes) => read?,
+        };
         if read == 0 {
             return Ok(());
         }
@@ -95,6 +136,10 @@ async fn handle_connection(
 
         if let Some(response) = handler.handle_json(input).await {
             write_json_line(&mut writer, &response).await?;
+        }
+
+        if *shutdown.borrow() {
+            return Ok(());
         }
     }
 }
