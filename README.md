@@ -30,3 +30,35 @@ crates/
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) and [`docs/roadmap.md`](docs/roadmap.md).
+
+## Local development configuration
+
+The production defaults use `/run/mcserver` and `/var/lib/mcserver`. For an unprivileged local run, override them:
+
+```bash
+mkdir -p var
+export MCSERVER_CONTROL_PLANE_SOCKET="$PWD/var/control-plane.sock"
+export MCSERVER_CONTROL_PLANE_DATABASE_URL="sqlite://$PWD/var/control-plane.db?mode=rwc"
+export RUST_LOG=mcserver_control_plane=debug
+cargo run -p mcserver-control-plane
+```
+
+Example request frame:
+
+```json
+{"jsonrpc":"2.0","method":"system.ping","id":1}
+```
+
+Create a durable server resource:
+
+```json
+{"jsonrpc":"2.0","method":"server.create","params":{"name":"community","spec":{"compute":{"region":"jp-osa","instance_type":"g6-standard-2","image":"debian-13"},"process":{"container_image":"docker.io/itzg/minecraft-server:latest","server_type":"VANILLA","version":"LATEST","environment":{}},"data":{"repository":"r2:mcserver/community"}}},"id":2}
+```
+
+Set desired state using an optional optimistic generation check:
+
+```json
+{"jsonrpc":"2.0","method":"server.set_desired_state","params":{"server_id":"00000000-0000-0000-0000-000000000000","desired_state":"running","expected_generation":1},"id":3}
+```
+
+The first implementation persists desired state and schedules reconciliation. Materializing a `ServerInstance` is intentionally the next milestone.
