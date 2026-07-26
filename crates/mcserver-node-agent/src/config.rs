@@ -30,8 +30,8 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let control_plane_address: SocketAddr =
             required("MCSERVER_NODE_AGENT_CONTROL_PLANE_ADDRESS")?
-            .parse()
-            .map_err(ConfigError::InvalidSocketAddress)?;
+                .parse()
+                .map_err(ConfigError::InvalidSocketAddress)?;
         if !control_plane_address.ip().is_loopback() {
             return Err(ConfigError::ControlPlaneAddressMustBeLoopback(
                 control_plane_address,
