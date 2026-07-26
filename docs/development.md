@@ -23,6 +23,18 @@ JSON-RPC methods use `resource.verb` in lower snake case, for example `server.se
 
 Database tables use plural `snake_case`. Foreign-key columns use the singular resource name plus `_id`.
 
+## Module layout
+
+For modules with child modules, use the modern file-plus-directory layout:
+
+```text
+application.rs
+application/
+└── server_service.rs
+```
+
+Do not introduce `mod.rs`. The named root file declares child modules and defines the module's public surface through explicit re-exports.
+
 ## Boundaries
 
 - Domain code must not depend on JSON-RPC wire DTOs.
