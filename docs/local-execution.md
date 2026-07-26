@@ -45,6 +45,8 @@ The local agent:
 
 The included local E2E verifier initializes a missing local repository, but refuses to overwrite an existing non-repository path. Each restic invocation waits up to the configured retry-lock duration for repository locks, serializing conflicting operations without treating normal contention as immediate failure. Snapshot publication in SQLite remains separately fenced.
 
+Because rootless Podman maps container UIDs and GIDs into the invoking user's subordinate ID ranges, the host user may not be able to read or remove files created inside `/data` directly. The node agent therefore runs restic restore and backup, as well as instance-data cleanup, through `podman unshare` so all data-plane filesystem operations use the same user namespace as the container.
+
 ## Podman
 
 The local agent creates a deterministic container name from the ServerInstance UUID and bind-mounts its private `data/` directory at `/data`.

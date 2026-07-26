@@ -300,10 +300,23 @@ async fn run_session(
                     }
                     match (response.result, response.error) {
                         (Some(result), None) => Ok(result),
-                        (None, Some(error)) => Err(AgentCallError::Remote {
-                            code: error.code,
-                            message: error.message,
-                        }),
+                        (None, Some(error)) => {
+                            let detail = error
+                                .data
+                                .as_ref()
+                                .and_then(|data| data.get("detail"))
+                                .and_then(Value::as_str);
+                            let message = match detail {
+                                Some(detail) if !detail.trim().is_empty() => {
+                                    format!("{}: {detail}", error.message)
+                                }
+                                _ => error.message,
+                            };
+                            Err(AgentCallError::Remote {
+                                code: error.code,
+                                message,
+                            })
+                        }
                         _ => Err(AgentCallError::Protocol(
                             "node-agent response must contain exactly one of result or error"
                                 .to_owned(),
@@ -348,6 +361,7 @@ struct WireResponse {
 struct ErrorObjectWire {
     code: i64,
     message: String,
+    data: Option<Value>,
 }
 
 async fn read_request(

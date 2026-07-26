@@ -92,4 +92,5 @@ barn0w1 <yuito.kiuchi.dev@gmail.com>
 ## External command conventions
 
 - Node-agent restic commands use `--retry-lock`; `MCSERVER_NODE_AGENT_RESTIC_RETRY_LOCK_SECONDS` defaults to 300 seconds.
+- Any operation that reads, writes, restores, or removes container-owned server data runs through `podman unshare`; host-side recursive filesystem operations must not assume subordinate-ID-owned paths are accessible.
 - Command timeout and repository-lock wait are durations, never persisted wall-clock timestamps.

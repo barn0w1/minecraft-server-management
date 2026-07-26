@@ -83,7 +83,8 @@ impl AgentExecutor {
                     .await?;
             }
             None => {
-                remove_directory_if_exists(&self.data_directory()).await?;
+                self.remove_paths_in_user_namespace([self.data_directory()])
+                    .await?;
                 fs::create_dir_all(self.data_directory()).await?;
             }
         }
@@ -251,24 +252,16 @@ impl AgentExecutor {
     }
 
     async fn remove_instance_storage(&self) -> Result<(), ExecutorError> {
-        let mut command = Command::new(&self.config.podman_binary);
-        command
-            .arg("unshare")
-            .arg("rm")
-            .arg("-rf")
-            .arg("--")
-            .arg(self.data_directory())
-            .arg(
-                self.config
-                    .state_directory
-                    .join(RESTORE_STAGING_DIRECTORY_NAME),
-            )
-            .arg(
-                self.config
-                    .state_directory
-                    .join(PREVIOUS_DATA_DIRECTORY_NAME),
-            );
-        self.run_command(command, "podman unshare cleanup").await?;
+        self.remove_paths_in_user_namespace([
+            self.data_directory(),
+            self.config
+                .state_directory
+                .join(RESTORE_STAGING_DIRECTORY_NAME),
+            self.config
+                .state_directory
+                .join(PREVIOUS_DATA_DIRECTORY_NAME),
+        ])
+        .await?;
 
         match fs::remove_file(self.state_path()).await {
             Ok(()) => Ok(()),
@@ -290,8 +283,8 @@ impl AgentExecutor {
             .config
             .state_directory
             .join(PREVIOUS_DATA_DIRECTORY_NAME);
-        remove_directory_if_exists(&staging).await?;
-        remove_directory_if_exists(&previous).await?;
+        self.remove_paths_in_user_namespace([staging.clone(), previous.clone()])
+            .await?;
         fs::create_dir_all(&staging).await?;
         let staging_arg = path_to_string(&staging)?;
         self.run_restic(
@@ -321,8 +314,8 @@ impl AgentExecutor {
             }
             return Err(error.into());
         }
-        remove_directory_if_exists(&previous).await?;
-        remove_directory_if_exists(&staging).await?;
+        self.remove_paths_in_user_namespace([previous, staging])
+            .await?;
         Ok(())
     }
 
@@ -473,16 +466,30 @@ impl AgentExecutor {
         current_directory: Option<&Path>,
     ) -> Result<Output, ExecutorError> {
         let retry_lock = format!("{}s", self.config.restic_retry_lock.as_secs());
-        let mut command = Command::new(&self.config.restic_binary);
+        let mut command = Command::new(&self.config.podman_binary);
         command
             .env("RESTIC_REPOSITORY", repository)
+            .arg("unshare")
+            .arg(&self.config.restic_binary)
             .arg("--retry-lock")
             .arg(retry_lock)
             .args(arguments);
         if let Some(directory) = current_directory {
             command.current_dir(directory);
         }
-        self.run_command_allow_failure(command, "restic").await
+        self.run_command_allow_failure(command, "restic in Podman user namespace")
+            .await
+    }
+
+    async fn remove_paths_in_user_namespace<const N: usize>(
+        &self,
+        paths: [PathBuf; N],
+    ) -> Result<(), ExecutorError> {
+        let mut command = Command::new(&self.config.podman_binary);
+        command.arg("unshare").arg("rm").arg("-rf").arg("--");
+        command.args(paths);
+        self.run_command(command, "podman unshare cleanup").await?;
+        Ok(())
     }
 
     async fn run_command(
@@ -647,14 +654,6 @@ async fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
         std::fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
     )
     .await
-}
-
-async fn remove_directory_if_exists(path: &Path) -> Result<(), std::io::Error> {
-    match fs::remove_dir_all(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 fn parse_backup_snapshot_id(output: &[u8]) -> Result<String, ExecutorError> {
