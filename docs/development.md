@@ -57,6 +57,10 @@ Do not introduce `mod.rs`. The named root file declares child modules and define
 - Minecraft server data remains opaque. Do not add file-specific behavior without an explicit decision.
 - Reconciler-owned resources are read-only through the client API unless a clear client-owned field is introduced.
 
+## SQL construction
+
+Pass fixed SQL to SQLx as string literals or `&'static str` constants, and pass values only through bind parameters. Use `QueryBuilder` when the SQL structure genuinely must be assembled at runtime. Do not use `AssertSqlSafe` merely to silence the type system; it requires an explicit security review of the generated SQL.
+
 ## State modeling
 
 Do not create one phase enum that combines Server, ServerInstance, ComputeInstance, agent connection, data operations, and process state.

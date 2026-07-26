@@ -7,17 +7,53 @@ use crate::domain::{
 
 use super::RepositoryError;
 
-const INSTANCE_COLUMNS: &str = r#"
-    id,
-    server_id,
-    server_generation,
-    resolved_spec_json,
-    fencing_token,
-    stop_requested_at_ms,
-    terminated_at_ms,
-    terminal_result,
-    created_at_ms,
-    updated_at_ms
+const SELECT_INSTANCE_BY_ID: &str = r#"
+    SELECT
+        id,
+        server_id,
+        server_generation,
+        resolved_spec_json,
+        fencing_token,
+        stop_requested_at_ms,
+        terminated_at_ms,
+        terminal_result,
+        created_at_ms,
+        updated_at_ms
+    FROM server_instances
+    WHERE id = ?
+"#;
+
+const SELECT_ACTIVE_INSTANCE_FOR_SERVER: &str = r#"
+    SELECT
+        id,
+        server_id,
+        server_generation,
+        resolved_spec_json,
+        fencing_token,
+        stop_requested_at_ms,
+        terminated_at_ms,
+        terminal_result,
+        created_at_ms,
+        updated_at_ms
+    FROM server_instances
+    WHERE server_id = ? AND terminated_at_ms IS NULL
+"#;
+
+const SELECT_INSTANCES_FOR_SERVER: &str = r#"
+    SELECT
+        id,
+        server_id,
+        server_generation,
+        resolved_spec_json,
+        fencing_token,
+        stop_requested_at_ms,
+        terminated_at_ms,
+        terminal_result,
+        created_at_ms,
+        updated_at_ms
+    FROM server_instances
+    WHERE server_id = ?
+    ORDER BY fencing_token DESC, id
 "#;
 
 #[derive(Debug, Clone)]
@@ -116,8 +152,7 @@ impl ServerInstanceRepository {
             ));
         }
 
-        let query = format!("SELECT {INSTANCE_COLUMNS} FROM server_instances WHERE id = ?");
-        let row = sqlx::query(&query)
+        let row = sqlx::query(SELECT_INSTANCE_BY_ID)
             .bind(instance_id.to_string())
             .fetch_one(&mut *transaction)
             .await?;
@@ -130,8 +165,7 @@ impl ServerInstanceRepository {
         &self,
         id: ServerInstanceId,
     ) -> Result<Option<ServerInstance>, RepositoryError> {
-        let query = format!("SELECT {INSTANCE_COLUMNS} FROM server_instances WHERE id = ?");
-        let row = sqlx::query(&query)
+        let row = sqlx::query(SELECT_INSTANCE_BY_ID)
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?;
@@ -142,11 +176,7 @@ impl ServerInstanceRepository {
         &self,
         server_id: ServerId,
     ) -> Result<Option<ServerInstance>, RepositoryError> {
-        let query = format!(
-            "SELECT {INSTANCE_COLUMNS} FROM server_instances \
-             WHERE server_id = ? AND terminated_at_ms IS NULL"
-        );
-        let row = sqlx::query(&query)
+        let row = sqlx::query(SELECT_ACTIVE_INSTANCE_FOR_SERVER)
             .bind(server_id.to_string())
             .fetch_optional(&self.pool)
             .await?;
@@ -157,11 +187,7 @@ impl ServerInstanceRepository {
         &self,
         server_id: ServerId,
     ) -> Result<Vec<ServerInstance>, RepositoryError> {
-        let query = format!(
-            "SELECT {INSTANCE_COLUMNS} FROM server_instances \
-             WHERE server_id = ? ORDER BY fencing_token DESC, id"
-        );
-        let rows = sqlx::query(&query)
+        let rows = sqlx::query(SELECT_INSTANCES_FOR_SERVER)
             .bind(server_id.to_string())
             .fetch_all(&self.pool)
             .await?;
