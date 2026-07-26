@@ -8,9 +8,7 @@ use thiserror::Error;
 /// Persistent data and external APIs use this representation. Durations,
 /// deadlines, and retry intervals must use `std::time::Duration` or Tokio's
 /// monotonic clock instead.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UnixTimestampMillis(i64);
 

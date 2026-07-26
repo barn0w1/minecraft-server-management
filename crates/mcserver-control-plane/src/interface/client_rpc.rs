@@ -346,10 +346,9 @@ impl RpcDispatchError {
             Self::Application(ApplicationError::NotFound) => {
                 ErrorObject::new(json_rpc::error_code::NOT_FOUND, "Server not found")
             }
-            Self::Application(ApplicationError::ServerInstanceNotFound) => ErrorObject::new(
-                json_rpc::error_code::NOT_FOUND,
-                "Server instance not found",
-            ),
+            Self::Application(ApplicationError::ServerInstanceNotFound) => {
+                ErrorObject::new(json_rpc::error_code::NOT_FOUND, "Server instance not found")
+            }
             Self::Application(
                 error @ (ApplicationError::GenerationConflict { .. }
                 | ApplicationError::ConcurrentUpdate

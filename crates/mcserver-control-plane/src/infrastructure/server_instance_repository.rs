@@ -328,7 +328,9 @@ mod tests {
         let first = instance_repository
             .create_for_running_server(server.id, first_time)
             .await?
-            .ok_or_else(|| RepositoryError::CorruptData("first instance was not created".to_owned()))?;
+            .ok_or_else(|| {
+                RepositoryError::CorruptData("first instance was not created".to_owned())
+            })?;
         assert_eq!(first.fencing_token, 1);
         assert!(
             instance_repository
@@ -338,7 +340,11 @@ mod tests {
         );
 
         let stop_time = UnixTimestampMillis::from_millis(2_000)?;
-        assert!(instance_repository.request_stop(first.id, stop_time).await?);
+        assert!(
+            instance_repository
+                .request_stop(first.id, stop_time)
+                .await?
+        );
         assert!(
             instance_repository
                 .complete(first.id, TerminalResult::Completed, stop_time)
@@ -348,7 +354,9 @@ mod tests {
         let second = instance_repository
             .create_for_running_server(server.id, stop_time)
             .await?
-            .ok_or_else(|| RepositoryError::CorruptData("second instance was not created".to_owned()))?;
+            .ok_or_else(|| {
+                RepositoryError::CorruptData("second instance was not created".to_owned())
+            })?;
         assert_eq!(second.fencing_token, 2);
         assert_ne!(first.id, second.id);
         Ok(())

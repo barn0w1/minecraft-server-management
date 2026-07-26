@@ -51,10 +51,7 @@ impl ReconcileWorker {
         )
     }
 
-    pub async fn run(
-        mut self,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), ReconcileError> {
+    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), ReconcileError> {
         let mut interval = tokio::time::interval(self.resync_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
