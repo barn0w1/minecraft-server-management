@@ -1,15 +1,19 @@
 use thiserror::Error;
 
 use crate::{
-    domain::{Server, ServerId, ServerName, ServerSpec, ValidationError},
+    domain::{
+        Clock, DesiredState, Server, ServerId, ServerName, ServerSpec, SystemClock,
+        ValidationError,
+    },
     infrastructure::{RepositoryError, ServerRepository},
-    reconciliation::{ReconcileScheduler, ScheduleError},
+    reconciliation::ReconcileScheduler,
 };
 
 #[derive(Debug, Clone)]
 pub struct ServerService {
     repository: ServerRepository,
     reconcile_scheduler: ReconcileScheduler,
+    clock: SystemClock,
 }
 
 impl ServerService {
@@ -18,13 +22,15 @@ impl ServerService {
         Self {
             repository,
             reconcile_scheduler,
+            clock: SystemClock,
         }
     }
 
     pub async fn create(&self, name: String, spec: ServerSpec) -> Result<Server, ApplicationError> {
-        let server = Server::new(ServerName::new(name)?, spec)?;
+        let now = self.clock.now()?;
+        let server = Server::new(ServerId::new(), ServerName::new(name)?, spec, now)?;
         self.repository.create(&server).await?;
-        self.reconcile_scheduler.enqueue(server.id).await?;
+        self.reconcile_scheduler.enqueue_best_effort(server.id);
         Ok(server)
     }
 
@@ -42,7 +48,7 @@ impl ServerService {
     pub async fn set_desired_state(
         &self,
         id: ServerId,
-        desired_state: crate::domain::DesiredState,
+        desired_state: DesiredState,
         expected_generation: Option<u64>,
     ) -> Result<Server, ApplicationError> {
         for _ in 0..3 {
@@ -56,7 +62,8 @@ impl ServerService {
             }
 
             let previous_generation = server.generation;
-            if !server.set_desired_state(desired_state)? {
+            let now = self.clock.now()?;
+            if !server.set_desired_state(desired_state, now)? {
                 return Ok(server);
             }
 
@@ -65,7 +72,7 @@ impl ServerService {
                 .update_desired_state(&server, previous_generation)
                 .await?
             {
-                self.reconcile_scheduler.enqueue(server.id).await?;
+                self.reconcile_scheduler.enqueue_best_effort(server.id);
                 return Ok(server);
             }
 
@@ -96,6 +103,6 @@ pub enum ApplicationError {
     ConcurrentUpdate,
     #[error("persistence failed")]
     Repository(#[from] RepositoryError),
-    #[error("reconciliation scheduling failed")]
-    ReconcileScheduling(#[from] ScheduleError),
+    #[error("timestamp generation failed")]
+    Timestamp(#[from] crate::domain::TimestampError),
 }

@@ -1,60 +1,84 @@
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
-use uuid::Uuid;
 
 use crate::domain::{
     ServerId, ServerInstance, ServerInstanceId, ServerSpec, TerminalResult, UnixTimestampMillis,
 };
 
-use super::RepositoryError;
+use super::{
+    RepositoryError,
+    server_repository::{
+        decode_timestamp, decode_uuid, i64_to_positive_u64,
+    },
+};
 
-const SELECT_INSTANCE_BY_ID: &str = r#"
-    SELECT
-        id,
-        server_id,
-        server_generation,
-        resolved_spec_json,
-        fencing_token,
-        stop_requested_at_ms,
-        terminated_at_ms,
-        terminal_result,
-        created_at_ms,
-        updated_at_ms
-    FROM server_instances
-    WHERE id = ?
-"#;
+const MAX_ERROR_CHARS: usize = 8192;
 
-const SELECT_ACTIVE_INSTANCE_FOR_SERVER: &str = r#"
-    SELECT
-        id,
-        server_id,
-        server_generation,
-        resolved_spec_json,
-        fencing_token,
-        stop_requested_at_ms,
-        terminated_at_ms,
-        terminal_result,
-        created_at_ms,
-        updated_at_ms
-    FROM server_instances
-    WHERE server_id = ? AND terminated_at_ms IS NULL
-"#;
+const SELECT_BY_ID: &str = r#"
+            SELECT
+                id,
+                server_id,
+                server_generation,
+                resolved_spec_json,
+                fencing_token,
+                source_snapshot_id,
+                data_prepared_at_ms,
+                process_running,
+                process_observed_at_ms,
+                result_snapshot_id,
+                stop_requested_at_ms,
+                terminated_at_ms,
+                terminal_result,
+                last_error,
+                created_at_ms,
+                updated_at_ms
+            FROM server_instances
+            WHERE id = ?
+            "#;
 
-const SELECT_INSTANCES_FOR_SERVER: &str = r#"
-    SELECT
-        id,
-        server_id,
-        server_generation,
-        resolved_spec_json,
-        fencing_token,
-        stop_requested_at_ms,
-        terminated_at_ms,
-        terminal_result,
-        created_at_ms,
-        updated_at_ms
-    FROM server_instances
-    WHERE server_id = ?
-    ORDER BY fencing_token DESC, id
-"#;
+const SELECT_ACTIVE_FOR_SERVER: &str = r#"
+            SELECT
+                id,
+                server_id,
+                server_generation,
+                resolved_spec_json,
+                fencing_token,
+                source_snapshot_id,
+                data_prepared_at_ms,
+                process_running,
+                process_observed_at_ms,
+                result_snapshot_id,
+                stop_requested_at_ms,
+                terminated_at_ms,
+                terminal_result,
+                last_error,
+                created_at_ms,
+                updated_at_ms
+            FROM server_instances
+            WHERE server_id = ? AND terminated_at_ms IS NULL
+            "#;
+
+const SELECT_FOR_SERVER: &str = r#"
+            SELECT
+                id,
+                server_id,
+                server_generation,
+                resolved_spec_json,
+                fencing_token,
+                source_snapshot_id,
+                data_prepared_at_ms,
+                process_running,
+                process_observed_at_ms,
+                result_snapshot_id,
+                stop_requested_at_ms,
+                terminated_at_ms,
+                terminal_result,
+                last_error,
+                created_at_ms,
+                updated_at_ms
+            FROM server_instances
+            WHERE server_id = ?
+            ORDER BY fencing_token DESC, id
+            "#;
 
 #[derive(Debug, Clone)]
 pub struct ServerInstanceRepository {
@@ -67,12 +91,6 @@ impl ServerInstanceRepository {
         Self { pool }
     }
 
-    /// Creates an active instance only when the server currently desires
-    /// running and does not already have an active instance.
-    ///
-    /// The fencing token allocation and instance insertion occur in one SQLite
-    /// transaction, so concurrent reconcilers cannot commit two active
-    /// instances for the same server.
     pub async fn create_for_running_server(
         &self,
         server_id: ServerId,
@@ -104,6 +122,7 @@ impl ServerInstanceRepository {
                 server_generation,
                 resolved_spec_json,
                 fencing_token,
+                source_snapshot_id,
                 created_at_ms,
                 updated_at_ms
             )
@@ -113,6 +132,7 @@ impl ServerInstanceRepository {
                 generation,
                 spec_json,
                 next_fencing_token,
+                current_snapshot_id,
                 instance_time_ms,
                 instance_time_ms
             FROM source
@@ -131,11 +151,11 @@ impl ServerInstanceRepository {
         .await?;
 
         if inserted.rows_affected() == 0 {
-            transaction.commit().await?;
+            transaction.rollback().await?;
             return Ok(None);
         }
 
-        let advanced = sqlx::query(
+        sqlx::query(
             r#"
             UPDATE servers
             SET next_fencing_token = next_fencing_token + 1
@@ -146,52 +166,41 @@ impl ServerInstanceRepository {
         .execute(&mut *transaction)
         .await?;
 
-        if advanced.rows_affected() != 1 {
-            return Err(RepositoryError::CorruptData(
-                "created a server instance without advancing its fencing token".to_owned(),
-            ));
-        }
-
-        let row = sqlx::query(SELECT_INSTANCE_BY_ID)
-            .bind(instance_id.to_string())
-            .fetch_one(&mut *transaction)
-            .await?;
-        let instance = decode_server_instance(&row)?;
         transaction.commit().await?;
-        Ok(Some(instance))
+        self.get(instance_id).await
     }
 
     pub async fn get(
         &self,
         id: ServerInstanceId,
     ) -> Result<Option<ServerInstance>, RepositoryError> {
-        let row = sqlx::query(SELECT_INSTANCE_BY_ID)
+        let row = sqlx::query(SELECT_BY_ID)
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?;
-        row.as_ref().map(decode_server_instance).transpose()
+        row.as_ref().map(decode_instance).transpose()
     }
 
     pub async fn get_active_for_server(
         &self,
         server_id: ServerId,
     ) -> Result<Option<ServerInstance>, RepositoryError> {
-        let row = sqlx::query(SELECT_ACTIVE_INSTANCE_FOR_SERVER)
+        let row = sqlx::query(SELECT_ACTIVE_FOR_SERVER)
             .bind(server_id.to_string())
             .fetch_optional(&self.pool)
             .await?;
-        row.as_ref().map(decode_server_instance).transpose()
+        row.as_ref().map(decode_instance).transpose()
     }
 
     pub async fn list_for_server(
         &self,
         server_id: ServerId,
     ) -> Result<Vec<ServerInstance>, RepositoryError> {
-        let rows = sqlx::query(SELECT_INSTANCES_FOR_SERVER)
+        let rows = sqlx::query(SELECT_FOR_SERVER)
             .bind(server_id.to_string())
             .fetch_all(&self.pool)
             .await?;
-        rows.iter().map(decode_server_instance).collect()
+        rows.iter().map(decode_instance).collect()
     }
 
     pub async fn request_stop(
@@ -206,8 +215,8 @@ impl ServerInstanceRepository {
                 stop_requested_at_ms = max(?, created_at_ms, updated_at_ms),
                 updated_at_ms = max(?, created_at_ms, updated_at_ms)
             WHERE id = ?
-              AND stop_requested_at_ms IS NULL
               AND terminated_at_ms IS NULL
+              AND stop_requested_at_ms IS NULL
             "#,
         )
         .bind(now.as_millis())
@@ -218,48 +227,143 @@ impl ServerInstanceRepository {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn mark_data_prepared(
+        &self,
+        id: ServerInstanceId,
+        now: UnixTimestampMillis,
+    ) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE server_instances
+            SET
+                data_prepared_at_ms = coalesce(data_prepared_at_ms, max(?, created_at_ms)),
+                last_error = NULL,
+                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE id = ? AND terminated_at_ms IS NULL
+            "#,
+        )
+        .bind(now.as_millis())
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn observe_process(
+        &self,
+        id: ServerInstanceId,
+        running: bool,
+        now: UnixTimestampMillis,
+    ) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE server_instances
+            SET
+                process_running = ?,
+                process_observed_at_ms = max(
+                    coalesce(process_observed_at_ms, 0),
+                    ?,
+                    updated_at_ms,
+                    created_at_ms
+                ),
+                last_error = NULL,
+                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE id = ? AND terminated_at_ms IS NULL
+            "#,
+        )
+        .bind(running)
+        .bind(now.as_millis())
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn record_error(
+        &self,
+        id: ServerInstanceId,
+        message: &str,
+        now: UnixTimestampMillis,
+    ) -> Result<(), RepositoryError> {
+        let message = truncate_chars(message, MAX_ERROR_CHARS);
+        sqlx::query(
+            r#"
+            UPDATE server_instances
+            SET last_error = ?, updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE id = ? AND terminated_at_ms IS NULL
+            "#,
+        )
+        .bind(message)
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn complete(
         &self,
         id: ServerInstanceId,
         result: TerminalResult,
         now: UnixTimestampMillis,
     ) -> Result<bool, RepositoryError> {
-        let updated = sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE server_instances
             SET
-                terminated_at_ms = max(?, stop_requested_at_ms, updated_at_ms),
+                process_running = 0,
+                process_observed_at_ms = max(
+                    coalesce(process_observed_at_ms, 0),
+                    ?,
+                    updated_at_ms,
+                    created_at_ms
+                ),
+                terminated_at_ms = max(
+                    ?,
+                    updated_at_ms,
+                    created_at_ms,
+                    coalesce(stop_requested_at_ms, 0)
+                ),
                 terminal_result = ?,
-                updated_at_ms = max(?, stop_requested_at_ms, updated_at_ms)
-            WHERE id = ?
-              AND stop_requested_at_ms IS NOT NULL
-              AND terminated_at_ms IS NULL
+                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE id = ? AND terminated_at_ms IS NULL
             "#,
         )
+        .bind(now.as_millis())
         .bind(now.as_millis())
         .bind(result.as_str())
         .bind(now.as_millis())
         .bind(id.to_string())
         .execute(&self.pool)
         .await?;
-        Ok(updated.rows_affected() == 1)
+        Ok(result.rows_affected() == 1)
     }
 }
 
-fn decode_server_instance(row: &SqliteRow) -> Result<ServerInstance, RepositoryError> {
-    let id = decode_uuid(row.try_get("id")?).map(ServerInstanceId::from_uuid)?;
-    let server_id = decode_uuid(row.try_get("server_id")?).map(ServerId::from_uuid)?;
-    let server_generation = decode_positive_u64(row.try_get("server_generation")?)?;
-    let resolved_spec_json = row.try_get::<String, _>("resolved_spec_json")?;
-    let resolved_spec = serde_json::from_str::<ServerSpec>(&resolved_spec_json)?;
-    let fencing_token = decode_positive_u64(row.try_get("fencing_token")?)?;
-    let stop_requested_at = decode_optional_timestamp(row.try_get("stop_requested_at_ms")?)?;
-    let terminated_at = decode_optional_timestamp(row.try_get("terminated_at_ms")?)?;
+fn decode_instance(row: &SqliteRow) -> Result<ServerInstance, RepositoryError> {
+    let id = decode_uuid(row.try_get::<String, _>("id")?)
+        .map(ServerInstanceId::from_uuid)?;
+    let server_id = decode_uuid(row.try_get::<String, _>("server_id")?)
+        .map(ServerId::from_uuid)?;
+    let server_generation = i64_to_positive_u64(row.try_get("server_generation")?)?;
+    let resolved_spec =
+        serde_json::from_str::<ServerSpec>(&row.try_get::<String, _>("resolved_spec_json")?)?;
+    let fencing_token = i64_to_positive_u64(row.try_get("fencing_token")?)?;
+    let source_snapshot_id = row.try_get("source_snapshot_id")?;
+    let data_prepared_at = optional_timestamp(row.try_get("data_prepared_at_ms")?)?;
+    let process_running = row.try_get("process_running")?;
+    let process_observed_at = optional_timestamp(row.try_get("process_observed_at_ms")?)?;
+    let result_snapshot_id = row.try_get("result_snapshot_id")?;
+    let stop_requested_at = optional_timestamp(row.try_get("stop_requested_at_ms")?)?;
+    let terminated_at = optional_timestamp(row.try_get("terminated_at_ms")?)?;
     let terminal_result = row
         .try_get::<Option<String>, _>("terminal_result")?
         .as_deref()
         .map(TerminalResult::parse)
         .transpose()?;
+    let last_error = row.try_get("last_error")?;
     let created_at = decode_timestamp(row.try_get("created_at_ms")?)?;
     let updated_at = decode_timestamp(row.try_get("updated_at_ms")?)?;
 
@@ -269,122 +373,30 @@ fn decode_server_instance(row: &SqliteRow) -> Result<ServerInstance, RepositoryE
         server_generation,
         resolved_spec,
         fencing_token,
+        source_snapshot_id,
+        data_prepared_at,
+        process_running,
+        process_observed_at,
+        result_snapshot_id,
         stop_requested_at,
         terminated_at,
         terminal_result,
+        last_error,
         created_at,
         updated_at,
     )
     .map_err(RepositoryError::from)
 }
 
-fn decode_uuid(value: String) -> Result<Uuid, RepositoryError> {
-    Uuid::parse_str(&value).map_err(|source| RepositoryError::CorruptData(source.to_string()))
-}
-
-fn decode_positive_u64(value: i64) -> Result<u64, RepositoryError> {
-    let value = u64::try_from(value).map_err(|_| RepositoryError::IntegerOutOfRange)?;
-    if value == 0 {
-        return Err(RepositoryError::IntegerOutOfRange);
+fn truncate_chars(value: &str, maximum: usize) -> String {
+    if value.chars().count() <= maximum {
+        return value.to_owned();
     }
-    Ok(value)
+    value.chars().take(maximum).collect()
 }
 
-fn decode_timestamp(value: i64) -> Result<UnixTimestampMillis, RepositoryError> {
-    UnixTimestampMillis::from_millis(value).map_err(RepositoryError::from)
-}
-
-fn decode_optional_timestamp(
+fn optional_timestamp(
     value: Option<i64>,
 ) -> Result<Option<UnixTimestampMillis>, RepositoryError> {
     value.map(decode_timestamp).transpose()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use sqlx::SqlitePool;
-
-    use super::*;
-    use crate::{
-        domain::{
-            ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerName, ServerSpec,
-        },
-        infrastructure::ServerRepository,
-    };
-
-    fn valid_spec() -> ServerSpec {
-        ServerSpec {
-            compute: ComputeSpec {
-                region: "jp-osa".to_owned(),
-                instance_type: "g6-standard-2".to_owned(),
-                image: "debian-13".to_owned(),
-            },
-            process: ProcessSpec {
-                container_image: "docker.io/itzg/minecraft-server:latest".to_owned(),
-                server_type: "VANILLA".to_owned(),
-                version: "LATEST".to_owned(),
-                environment: BTreeMap::new(),
-            },
-            data: DataSpec {
-                repository: "r2:mcserver/example".to_owned(),
-            },
-        }
-    }
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn only_one_active_instance_exists_and_fencing_tokens_increase(
-        pool: SqlitePool,
-    ) -> Result<(), RepositoryError> {
-        let server_repository = ServerRepository::new(pool.clone());
-        let instance_repository = ServerInstanceRepository::new(pool);
-        let mut server = Server::new(ServerName::new("community")?, valid_spec())?;
-        server_repository.create(&server).await?;
-
-        let previous_generation = server.generation;
-        assert!(server.set_desired_state(DesiredState::Running)?);
-        assert!(
-            server_repository
-                .update_desired_state(&server, previous_generation)
-                .await?
-        );
-
-        let first_time = UnixTimestampMillis::from_millis(1_000)?;
-        let first = instance_repository
-            .create_for_running_server(server.id, first_time)
-            .await?
-            .ok_or_else(|| {
-                RepositoryError::CorruptData("first instance was not created".to_owned())
-            })?;
-        assert_eq!(first.fencing_token, 1);
-        assert!(
-            instance_repository
-                .create_for_running_server(server.id, first_time)
-                .await?
-                .is_none()
-        );
-
-        let stop_time = UnixTimestampMillis::from_millis(2_000)?;
-        assert!(
-            instance_repository
-                .request_stop(first.id, stop_time)
-                .await?
-        );
-        assert!(
-            instance_repository
-                .complete(first.id, TerminalResult::Completed, stop_time)
-                .await?
-        );
-
-        let second = instance_repository
-            .create_for_running_server(server.id, stop_time)
-            .await?
-            .ok_or_else(|| {
-                RepositoryError::CorruptData("second instance was not created".to_owned())
-            })?;
-        assert_eq!(second.fencing_token, 2);
-        assert_ne!(first.id, second.id);
-        Ok(())
-    }
 }

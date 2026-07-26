@@ -27,11 +27,10 @@ pub enum TerminalResult {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ComputeSpec {
-    pub region: String,
-    pub instance_type: String,
-    pub image: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ComputeSpec {
+    Local,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +38,16 @@ pub struct ProcessSpec {
     pub container_image: String,
     pub server_type: String,
     pub version: String,
+    pub host_port: u16,
+    #[serde(default = "default_stop_timeout_seconds")]
+    pub stop_timeout_seconds: u64,
+    pub accept_eula: bool,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+}
+
+const fn default_stop_timeout_seconds() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +105,7 @@ pub struct ServerResource {
     pub desired_state: DesiredState,
     pub spec: ServerSpec,
     pub created_at_ms: i64,
+    pub current_snapshot_id: Option<String>,
     pub updated_at_ms: i64,
 }
 
@@ -113,6 +121,12 @@ pub struct ServerInstanceResource {
     pub server_generation: u64,
     pub resolved_spec: ServerSpec,
     pub fencing_token: u64,
+    pub source_snapshot_id: Option<String>,
+    pub data_prepared_at_ms: Option<i64>,
+    pub process_running: bool,
+    pub process_observed_at_ms: Option<i64>,
+    pub result_snapshot_id: Option<String>,
+    pub last_error: Option<String>,
     pub stop_requested_at_ms: Option<i64>,
     pub terminated_at_ms: Option<i64>,
     pub terminal_result: Option<TerminalResult>,

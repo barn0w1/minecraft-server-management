@@ -7,7 +7,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{TimestampError, UnixTimestampMillis};
+use super::UnixTimestampMillis;
+
+const RESERVED_ENVIRONMENT_KEYS: [&str; 4] = ["EULA", "TYPE", "VERSION", "SKIP_SERVER_PROPERTIES"];
+const MAX_CONTAINER_IMAGE_CHARS: usize = 512;
+const MAX_SERVER_TYPE_CHARS: usize = 128;
+const MAX_VERSION_CHARS: usize = 128;
+const MAX_REPOSITORY_CHARS: usize = 4096;
+const MAX_ENVIRONMENT_ENTRIES: usize = 128;
+const MAX_ENVIRONMENT_KEY_CHARS: usize = 128;
+const MAX_ENVIRONMENT_VALUE_CHARS: usize = 8192;
+const MAX_SNAPSHOT_ID_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -54,14 +64,12 @@ impl ServerName {
         if trimmed.is_empty() {
             return Err(ValidationError::BlankField("name"));
         }
-
         if trimmed.chars().count() > 128 {
             return Err(ValidationError::FieldTooLong {
                 field: "name",
                 maximum: 128,
             });
         }
-
         if trimmed.chars().any(char::is_control) {
             return Err(ValidationError::ControlCharacter("name"));
         }
@@ -103,11 +111,10 @@ impl DesiredState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ComputeSpec {
-    pub region: String,
-    pub instance_type: String,
-    pub image: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ComputeSpec {
+    Local,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +122,9 @@ pub struct ProcessSpec {
     pub container_image: String,
     pub server_type: String,
     pub version: String,
+    pub host_port: u16,
+    pub stop_timeout_seconds: u64,
+    pub accept_eula: bool,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
 }
@@ -133,16 +143,70 @@ pub struct ServerSpec {
 
 impl ServerSpec {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        require_non_blank("compute.region", &self.compute.region)?;
-        require_non_blank("compute.instance_type", &self.compute.instance_type)?;
-        require_non_blank("compute.image", &self.compute.image)?;
-        require_non_blank("process.container_image", &self.process.container_image)?;
-        require_non_blank("process.server_type", &self.process.server_type)?;
-        require_non_blank("process.version", &self.process.version)?;
-        require_non_blank("data.repository", &self.data.repository)?;
+        for (field, value, maximum) in [
+            (
+                "process.container_image",
+                self.process.container_image.as_str(),
+                MAX_CONTAINER_IMAGE_CHARS,
+            ),
+            (
+                "process.server_type",
+                self.process.server_type.as_str(),
+                MAX_SERVER_TYPE_CHARS,
+            ),
+            (
+                "process.version",
+                self.process.version.as_str(),
+                MAX_VERSION_CHARS,
+            ),
+            (
+                "data.repository",
+                self.data.repository.as_str(),
+                MAX_REPOSITORY_CHARS,
+            ),
+        ] {
+            require_non_blank(field, value)?;
+            require_maximum_length(field, value, maximum)?;
+            reject_nul(field, value)?;
+        }
 
-        for key in self.process.environment.keys() {
+        if self.process.host_port == 0 {
+            return Err(ValidationError::ZeroValue("process.host_port"));
+        }
+        if self.process.stop_timeout_seconds == 0 {
+            return Err(ValidationError::ZeroValue(
+                "process.stop_timeout_seconds",
+            ));
+        }
+        if !self.process.accept_eula {
+            return Err(ValidationError::EulaNotAccepted);
+        }
+
+        if self.process.environment.len() > MAX_ENVIRONMENT_ENTRIES {
+            return Err(ValidationError::TooManyEnvironmentVariables {
+                maximum: MAX_ENVIRONMENT_ENTRIES,
+            });
+        }
+        for (key, value) in &self.process.environment {
             require_non_blank("process.environment key", key)?;
+            require_maximum_length(
+                "process.environment key",
+                key,
+                MAX_ENVIRONMENT_KEY_CHARS,
+            )?;
+            require_maximum_length(
+                "process.environment value",
+                value,
+                MAX_ENVIRONMENT_VALUE_CHARS,
+            )?;
+            reject_nul("process.environment key", key)?;
+            reject_nul("process.environment value", value)?;
+            if !is_valid_environment_key(key) {
+                return Err(ValidationError::InvalidEnvironmentKey(key.clone()));
+            }
+            if RESERVED_ENVIRONMENT_KEYS.contains(&key.as_str()) {
+                return Err(ValidationError::ReservedEnvironmentKey(key.clone()));
+            }
         }
 
         Ok(())
@@ -156,21 +220,27 @@ pub struct Server {
     pub generation: u64,
     pub desired_state: DesiredState,
     pub spec: ServerSpec,
+    pub current_snapshot_id: Option<String>,
     pub created_at: UnixTimestampMillis,
     pub updated_at: UnixTimestampMillis,
 }
 
 impl Server {
-    pub fn new(name: ServerName, spec: ServerSpec) -> Result<Self, ValidationError> {
+    pub fn new(
+        id: ServerId,
+        name: ServerName,
+        spec: ServerSpec,
+        now: UnixTimestampMillis,
+    ) -> Result<Self, ValidationError> {
         spec.validate()?;
-        let now = UnixTimestampMillis::now()?;
 
         Ok(Self {
-            id: ServerId::new(),
+            id,
             name,
             generation: 1,
             desired_state: DesiredState::Stopped,
             spec,
+            current_snapshot_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -183,6 +253,7 @@ impl Server {
         generation: u64,
         desired_state: DesiredState,
         spec: ServerSpec,
+        current_snapshot_id: Option<String>,
         created_at: UnixTimestampMillis,
         updated_at: UnixTimestampMillis,
     ) -> Result<Self, ValidationError> {
@@ -192,6 +263,15 @@ impl Server {
         if updated_at < created_at {
             return Err(ValidationError::InvalidTimestampOrder);
         }
+        if let Some(snapshot_id) = current_snapshot_id.as_deref() {
+            require_non_blank("current_snapshot_id", snapshot_id)?;
+            require_maximum_length(
+                "current_snapshot_id",
+                snapshot_id,
+                MAX_SNAPSHOT_ID_CHARS,
+            )?;
+            reject_nul("current_snapshot_id", snapshot_id)?;
+        }
         spec.validate()?;
 
         Ok(Self {
@@ -200,6 +280,7 @@ impl Server {
             generation,
             desired_state,
             spec,
+            current_snapshot_id,
             created_at,
             updated_at,
         })
@@ -208,6 +289,7 @@ impl Server {
     pub fn set_desired_state(
         &mut self,
         desired_state: DesiredState,
+        now: UnixTimestampMillis,
     ) -> Result<bool, ValidationError> {
         if self.desired_state == desired_state {
             return Ok(false);
@@ -218,7 +300,7 @@ impl Server {
             .generation
             .checked_add(1)
             .ok_or(ValidationError::GenerationOverflow)?;
-        self.updated_at = std::cmp::max(self.updated_at, UnixTimestampMillis::now()?);
+        self.updated_at = std::cmp::max(self.updated_at, now);
         Ok(true)
     }
 }
@@ -226,6 +308,33 @@ impl Server {
 fn require_non_blank(field: &'static str, value: &str) -> Result<(), ValidationError> {
     if value.trim().is_empty() {
         return Err(ValidationError::BlankField(field));
+    }
+    Ok(())
+}
+
+fn require_maximum_length(
+    field: &'static str,
+    value: &str,
+    maximum: usize,
+) -> Result<(), ValidationError> {
+    if value.chars().count() > maximum {
+        return Err(ValidationError::FieldTooLong { field, maximum });
+    }
+    Ok(())
+}
+
+fn is_valid_environment_key(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn reject_nul(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    if value.contains('\0') {
+        return Err(ValidationError::NulByte(field));
     }
     Ok(())
 }
@@ -238,14 +347,24 @@ pub enum ValidationError {
     FieldTooLong { field: &'static str, maximum: usize },
     #[error("{0} must not contain control characters")]
     ControlCharacter(&'static str),
+    #[error("{0} must not contain a NUL byte")]
+    NulByte(&'static str),
+    #[error("{0} must be greater than zero")]
+    ZeroValue(&'static str),
+    #[error("Minecraft EULA acceptance must be explicit")]
+    EulaNotAccepted,
+    #[error("process environment contains more than {maximum} entries")]
+    TooManyEnvironmentVariables { maximum: usize },
+    #[error("process environment key is invalid: {0}")]
+    InvalidEnvironmentKey(String),
+    #[error("process environment key is managed by the system: {0}")]
+    ReservedEnvironmentKey(String),
     #[error("server generation must be greater than zero")]
     ZeroGeneration,
     #[error("server generation overflowed")]
     GenerationOverflow,
     #[error("server timestamps are not in chronological order")]
     InvalidTimestampOrder,
-    #[error("system clock timestamp is invalid")]
-    Timestamp(#[from] TimestampError),
     #[error("invalid persisted value for {field}: {value}")]
     InvalidPersistedValue { field: &'static str, value: String },
 }
@@ -256,26 +375,26 @@ mod tests {
 
     fn valid_spec() -> ServerSpec {
         ServerSpec {
-            compute: ComputeSpec {
-                region: "jp-osa".to_owned(),
-                instance_type: "g6-standard-2".to_owned(),
-                image: "debian-13".to_owned(),
-            },
+            compute: ComputeSpec::Local,
             process: ProcessSpec {
                 container_image: "docker.io/itzg/minecraft-server:latest".to_owned(),
                 server_type: "VANILLA".to_owned(),
                 version: "LATEST".to_owned(),
+                host_port: 25_565,
+                stop_timeout_seconds: 30,
+                accept_eula: true,
                 environment: BTreeMap::new(),
             },
             data: DataSpec {
-                repository: "r2:mcserver/example".to_owned(),
+                repository: "/tmp/mcserver-restic".to_owned(),
             },
         }
     }
 
     #[test]
-    fn new_server_starts_stopped_at_generation_one() -> Result<(), ValidationError> {
-        let server = Server::new(ServerName::new("community")?, valid_spec())?;
+    fn new_server_starts_stopped_at_generation_one() -> Result<(), Box<dyn std::error::Error>> {
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let server = Server::new(ServerId::new(), ServerName::new("community")?, valid_spec(), now)?;
 
         assert_eq!(server.generation, 1);
         assert_eq!(server.desired_state, DesiredState::Stopped);
@@ -283,11 +402,46 @@ mod tests {
     }
 
     #[test]
-    fn setting_same_desired_state_is_idempotent() -> Result<(), ValidationError> {
-        let mut server = Server::new(ServerName::new("community")?, valid_spec())?;
+    fn setting_same_desired_state_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let mut server = Server::new(ServerId::new(), ServerName::new("community")?, valid_spec(), now)?;
 
-        assert!(!server.set_desired_state(DesiredState::Stopped)?);
+        assert!(!server.set_desired_state(DesiredState::Stopped, now)?);
         assert_eq!(server.generation, 1);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_system_managed_environment_keys() {
+        let mut spec = valid_spec();
+        spec.process
+            .environment
+            .insert("EULA".to_owned(), "TRUE".to_owned());
+
+        assert!(matches!(
+            spec.validate(),
+            Err(ValidationError::ReservedEnvironmentKey(key)) if key == "EULA"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_environment_keys() {
+        let mut spec = valid_spec();
+        spec.process
+            .environment
+            .insert("INVALID-KEY".to_owned(), "value".to_owned());
+
+        assert!(matches!(
+            spec.validate(),
+            Err(ValidationError::InvalidEnvironmentKey(key)) if key == "INVALID-KEY"
+        ));
+    }
+
+    #[test]
+    fn requires_explicit_eula_acceptance() {
+        let mut spec = valid_spec();
+        spec.process.accept_eula = false;
+
+        assert!(matches!(spec.validate(), Err(ValidationError::EulaNotAccepted)));
     }
 }

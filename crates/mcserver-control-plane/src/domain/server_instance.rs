@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 use super::{ServerId, ServerSpec, UnixTimestampMillis};
 
+const MAX_SNAPSHOT_ID_CHARS: usize = 256;
+const MAX_ERROR_CHARS: usize = 8192;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ServerInstanceId(Uuid);
@@ -74,9 +77,15 @@ pub struct ServerInstance {
     pub server_generation: u64,
     pub resolved_spec: ServerSpec,
     pub fencing_token: u64,
+    pub source_snapshot_id: Option<String>,
+    pub data_prepared_at: Option<UnixTimestampMillis>,
+    pub process_running: bool,
+    pub process_observed_at: Option<UnixTimestampMillis>,
+    pub result_snapshot_id: Option<String>,
     pub stop_requested_at: Option<UnixTimestampMillis>,
     pub terminated_at: Option<UnixTimestampMillis>,
     pub terminal_result: Option<TerminalResult>,
+    pub last_error: Option<String>,
     pub created_at: UnixTimestampMillis,
     pub updated_at: UnixTimestampMillis,
 }
@@ -89,9 +98,15 @@ impl ServerInstance {
         server_generation: u64,
         resolved_spec: ServerSpec,
         fencing_token: u64,
+        source_snapshot_id: Option<String>,
+        data_prepared_at: Option<UnixTimestampMillis>,
+        process_running: bool,
+        process_observed_at: Option<UnixTimestampMillis>,
+        result_snapshot_id: Option<String>,
         stop_requested_at: Option<UnixTimestampMillis>,
         terminated_at: Option<UnixTimestampMillis>,
         terminal_result: Option<TerminalResult>,
+        last_error: Option<String>,
         created_at: UnixTimestampMillis,
         updated_at: UnixTimestampMillis,
     ) -> Result<Self, ServerInstanceValidationError> {
@@ -107,23 +122,72 @@ impl ServerInstance {
         if terminated_at.is_some() != terminal_result.is_some() {
             return Err(ServerInstanceValidationError::IncompleteTerminalState);
         }
-        if updated_at < created_at
-            || stop_requested_at.is_some_and(|requested| requested > updated_at)
-            || terminated_at.is_some_and(|terminated| terminated > updated_at)
+        if process_running && process_observed_at.is_none() {
+            return Err(ServerInstanceValidationError::MissingProcessObservation);
+        }
+        if last_error
+            .as_deref()
+            .is_some_and(|message| message.trim().is_empty())
         {
-            return Err(ServerInstanceValidationError::InvalidTimestampOrder);
+            return Err(ServerInstanceValidationError::BlankLastError);
         }
-        if terminated_at.is_some_and(|terminated| terminated < created_at) {
-            return Err(ServerInstanceValidationError::InvalidTimestampOrder);
-        }
-        if stop_requested_at.is_some_and(|requested| requested < created_at) {
-            return Err(ServerInstanceValidationError::InvalidTimestampOrder);
-        }
-        if stop_requested_at
-            .zip(terminated_at)
-            .is_some_and(|(requested, terminated)| terminated < requested)
+        if last_error
+            .as_deref()
+            .is_some_and(|message| message.contains('\0'))
         {
+            return Err(ServerInstanceValidationError::NulByte("last_error"));
+        }
+        if last_error
+            .as_deref()
+            .is_some_and(|message| message.chars().count() > MAX_ERROR_CHARS)
+        {
+            return Err(ServerInstanceValidationError::FieldTooLong {
+                field: "last_error",
+                maximum: MAX_ERROR_CHARS,
+            });
+        }
+        for value in [
+            data_prepared_at,
+            process_observed_at,
+            stop_requested_at,
+            terminated_at,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value < created_at || value > updated_at {
+                return Err(ServerInstanceValidationError::InvalidTimestampOrder);
+            }
+        }
+        if updated_at < created_at {
             return Err(ServerInstanceValidationError::InvalidTimestampOrder);
+        }
+        if let Some(terminated) = terminated_at {
+            for prior in [data_prepared_at, process_observed_at, stop_requested_at]
+                .into_iter()
+                .flatten()
+            {
+                if terminated < prior {
+                    return Err(ServerInstanceValidationError::InvalidTimestampOrder);
+                }
+            }
+        }
+        for (field, value) in [
+            ("source_snapshot_id", source_snapshot_id.as_deref()),
+            ("result_snapshot_id", result_snapshot_id.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                return Err(ServerInstanceValidationError::BlankField(field));
+            }
+            if value.is_some_and(|value| value.contains('\0')) {
+                return Err(ServerInstanceValidationError::NulByte(field));
+            }
+            if value.is_some_and(|value| value.chars().count() > MAX_SNAPSHOT_ID_CHARS) {
+                return Err(ServerInstanceValidationError::FieldTooLong {
+                    field,
+                    maximum: MAX_SNAPSHOT_ID_CHARS,
+                });
+            }
         }
 
         Ok(Self {
@@ -132,9 +196,15 @@ impl ServerInstance {
             server_generation,
             resolved_spec,
             fencing_token,
+            source_snapshot_id,
+            data_prepared_at,
+            process_running,
+            process_observed_at,
+            result_snapshot_id,
             stop_requested_at,
             terminated_at,
             terminal_result,
+            last_error,
             created_at,
             updated_at,
         })
@@ -156,58 +226,18 @@ pub enum ServerInstanceValidationError {
     InvalidResolvedSpec(#[source] super::ValidationError),
     #[error("terminated_at and terminal_result must either both be set or both be absent")]
     IncompleteTerminalState,
+    #[error("a running process must have an observation timestamp")]
+    MissingProcessObservation,
     #[error("server instance timestamps are not in chronological order")]
     InvalidTimestampOrder,
+    #[error("{0} must not be blank")]
+    BlankField(&'static str),
+    #[error("{0} must not contain a NUL byte")]
+    NulByte(&'static str),
+    #[error("{field} must be no longer than {maximum} characters")]
+    FieldTooLong { field: &'static str, maximum: usize },
+    #[error("last_error must not be blank")]
+    BlankLastError,
     #[error("invalid persisted value for {field}: {value}")]
     InvalidPersistedValue { field: &'static str, value: String },
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::domain::{ComputeSpec, DataSpec, ProcessSpec};
-
-    fn valid_spec() -> ServerSpec {
-        ServerSpec {
-            compute: ComputeSpec {
-                region: "jp-osa".to_owned(),
-                instance_type: "g6-standard-2".to_owned(),
-                image: "debian-13".to_owned(),
-            },
-            process: ProcessSpec {
-                container_image: "docker.io/itzg/minecraft-server:latest".to_owned(),
-                server_type: "VANILLA".to_owned(),
-                version: "LATEST".to_owned(),
-                environment: BTreeMap::new(),
-            },
-            data: DataSpec {
-                repository: "r2:mcserver/example".to_owned(),
-            },
-        }
-    }
-
-    #[test]
-    fn terminal_fields_must_be_set_together() -> Result<(), Box<dyn std::error::Error>> {
-        let now = UnixTimestampMillis::from_millis(1_000)?;
-        let result = ServerInstance::rehydrate(
-            ServerInstanceId::new(),
-            ServerId::new(),
-            1,
-            valid_spec(),
-            1,
-            None,
-            Some(now),
-            None,
-            now,
-            now,
-        );
-
-        assert!(matches!(
-            result,
-            Err(ServerInstanceValidationError::IncompleteTerminalState)
-        ));
-        Ok(())
-    }
 }

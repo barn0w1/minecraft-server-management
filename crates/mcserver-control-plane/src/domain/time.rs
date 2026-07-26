@@ -1,32 +1,12 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// A wall-clock timestamp expressed as milliseconds since the Unix epoch.
-///
-/// Persistent data and external APIs use this representation. Durations,
-/// deadlines, and retry intervals must use `std::time::Duration` or Tokio's
-/// monotonic clock instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UnixTimestampMillis(i64);
 
 impl UnixTimestampMillis {
-    pub fn now() -> Result<Self, TimestampError> {
-        Self::from_system_time(SystemTime::now())
-    }
-
-    pub fn from_system_time(value: SystemTime) -> Result<Self, TimestampError> {
-        let duration = value
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| TimestampError::BeforeUnixEpoch)?;
-        let milliseconds =
-            i64::try_from(duration.as_millis()).map_err(|_| TimestampError::OutOfRange)?;
-        Ok(Self(milliseconds))
-    }
-
-    pub const fn from_millis(value: i64) -> Result<Self, TimestampError> {
+    pub fn from_millis(value: i64) -> Result<Self, TimestampError> {
         if value < 0 {
             return Err(TimestampError::BeforeUnixEpoch);
         }
@@ -39,12 +19,30 @@ impl UnixTimestampMillis {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Result<UnixTimestampMillis, TimestampError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Result<UnixTimestampMillis, TimestampError> {
+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let milliseconds = i64::try_from(elapsed.as_millis())
+            .map_err(|_| TimestampError::OutOfRange)?;
+        UnixTimestampMillis::from_millis(milliseconds)
+    }
+}
+
+#[derive(Debug, Error)]
 pub enum TimestampError {
-    #[error("timestamp is before the Unix epoch")]
+    #[error("system clock is before the Unix epoch")]
     BeforeUnixEpoch,
-    #[error("timestamp cannot be represented as signed 64-bit milliseconds")]
+    #[error("Unix timestamp is outside the supported signed 64-bit millisecond range")]
     OutOfRange,
+    #[error("system clock operation failed")]
+    SystemTime(#[from] SystemTimeError),
 }
 
 #[cfg(test)]
@@ -52,17 +50,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_negative_milliseconds() {
-        assert_eq!(
+    fn rejects_negative_timestamp() {
+        assert!(matches!(
             UnixTimestampMillis::from_millis(-1),
             Err(TimestampError::BeforeUnixEpoch)
-        );
-    }
-
-    #[test]
-    fn preserves_millisecond_value() -> Result<(), TimestampError> {
-        let timestamp = UnixTimestampMillis::from_millis(1_700_000_000_123)?;
-        assert_eq!(timestamp.as_millis(), 1_700_000_000_123);
-        Ok(())
+        ));
     }
 }

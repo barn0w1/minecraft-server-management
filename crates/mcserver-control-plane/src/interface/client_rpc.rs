@@ -94,7 +94,7 @@ impl ClientRpcHandler {
         }
 
         if !matches!(
-            request.params,
+            &request.params,
             Value::Null | Value::Array(_) | Value::Object(_)
         ) {
             return request.id.response_id().map(|id| {
@@ -233,15 +233,16 @@ fn response_value(response: Response) -> Value {
 
 fn domain_spec(spec: client::ServerSpec) -> ServerSpec {
     ServerSpec {
-        compute: ComputeSpec {
-            region: spec.compute.region,
-            instance_type: spec.compute.instance_type,
-            image: spec.compute.image,
+        compute: match spec.compute {
+            client::ComputeSpec::Local => ComputeSpec::Local,
         },
         process: ProcessSpec {
             container_image: spec.process.container_image,
             server_type: spec.process.server_type,
             version: spec.process.version,
+            host_port: spec.process.host_port,
+            stop_timeout_seconds: spec.process.stop_timeout_seconds,
+            accept_eula: spec.process.accept_eula,
             environment: spec.process.environment,
         },
         data: DataSpec {
@@ -252,15 +253,16 @@ fn domain_spec(spec: client::ServerSpec) -> ServerSpec {
 
 fn protocol_spec(spec: ServerSpec) -> client::ServerSpec {
     client::ServerSpec {
-        compute: client::ComputeSpec {
-            region: spec.compute.region,
-            instance_type: spec.compute.instance_type,
-            image: spec.compute.image,
+        compute: match spec.compute {
+            ComputeSpec::Local => client::ComputeSpec::Local,
         },
         process: client::ProcessSpec {
             container_image: spec.process.container_image,
             server_type: spec.process.server_type,
             version: spec.process.version,
+            host_port: spec.process.host_port,
+            stop_timeout_seconds: spec.process.stop_timeout_seconds,
+            accept_eula: spec.process.accept_eula,
             environment: spec.process.environment,
         },
         data: client::DataSpec {
@@ -291,6 +293,7 @@ fn protocol_server(server: Server) -> ServerResource {
         desired_state: protocol_desired_state(server.desired_state),
         spec: protocol_spec(server.spec),
         created_at_ms: server.created_at.as_millis(),
+        current_snapshot_id: server.current_snapshot_id,
         updated_at_ms: server.updated_at.as_millis(),
     }
 }
@@ -302,6 +305,14 @@ fn protocol_server_instance(instance: ServerInstance) -> ServerInstanceResource 
         server_generation: instance.server_generation,
         resolved_spec: protocol_spec(instance.resolved_spec),
         fencing_token: instance.fencing_token,
+        source_snapshot_id: instance.source_snapshot_id,
+        data_prepared_at_ms: instance.data_prepared_at.map(|value| value.as_millis()),
+        process_running: instance.process_running,
+        process_observed_at_ms: instance
+            .process_observed_at
+            .map(|value| value.as_millis()),
+        result_snapshot_id: instance.result_snapshot_id,
+        last_error: instance.last_error,
         stop_requested_at_ms: instance.stop_requested_at.map(|value| value.as_millis()),
         terminated_at_ms: instance.terminated_at.map(|value| value.as_millis()),
         terminal_result: instance.terminal_result.map(protocol_terminal_result),
