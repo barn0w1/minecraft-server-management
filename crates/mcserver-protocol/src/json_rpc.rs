@@ -38,8 +38,7 @@ impl RequestId {
     pub fn is_valid(&self) -> bool {
         matches!(
             self,
-            Self::Missing
-                | Self::Present(Value::Null | Value::Number(_) | Value::String(_))
+            Self::Missing | Self::Present(Value::Null | Value::Number(_) | Value::String(_))
         )
     }
 }
@@ -125,9 +124,8 @@ mod tests {
 
     #[test]
     fn absent_id_is_a_notification() -> Result<(), serde_json::Error> {
-        let request = serde_json::from_str::<Request>(
-            r#"{"jsonrpc":"2.0","method":"system.ping"}"#,
-        )?;
+        let request =
+            serde_json::from_str::<Request>(r#"{"jsonrpc":"2.0","method":"system.ping"}"#)?;
 
         assert!(request.id.is_notification());
         Ok(())
@@ -135,9 +133,8 @@ mod tests {
 
     #[test]
     fn object_id_is_invalid() -> Result<(), serde_json::Error> {
-        let request = serde_json::from_str::<Request>(
-            r#"{"jsonrpc":"2.0","method":"system.ping","id":{}}"#,
-        )?;
+        let request =
+            serde_json::from_str::<Request>(r#"{"jsonrpc":"2.0","method":"system.ping","id":{}}"#)?;
 
         assert!(!request.id.is_valid());
         Ok(())

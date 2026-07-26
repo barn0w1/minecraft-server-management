@@ -43,10 +43,7 @@ impl UnixSocketServer {
         })
     }
 
-    pub async fn run(
-        self,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), UnixSocketError> {
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), UnixSocketError> {
         let socket_path = self.socket_path.clone();
         let _guard = SocketPathGuard::new(socket_path);
 
@@ -154,9 +151,11 @@ where
 }
 
 async fn prepare_socket_path(path: &Path) -> Result<(), UnixSocketError> {
-    let parent = path.parent().ok_or_else(|| UnixSocketError::MissingParent {
-        path: path.to_path_buf(),
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| UnixSocketError::MissingParent {
+            path: path.to_path_buf(),
+        })?;
     tokio::fs::create_dir_all(parent).await?;
 
     match tokio::fs::symlink_metadata(path).await {
@@ -187,7 +186,9 @@ impl Drop for SocketPathGuard {
         match std::fs::remove_file(&self.path) {
             Ok(()) => info!(path = %self.path.display(), "removed client JSON-RPC socket"),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => error!(path = %self.path.display(), %error, "failed to remove client JSON-RPC socket"),
+            Err(error) => {
+                error!(path = %self.path.display(), %error, "failed to remove client JSON-RPC socket")
+            }
         }
     }
 }

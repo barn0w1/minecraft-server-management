@@ -57,12 +57,8 @@ impl Config {
 
 fn parse_socket_mode(value: Option<String>) -> Result<u32, ConfigError> {
     let mode = match value {
-        Some(value) => u32::from_str_radix(value.trim_start_matches("0o"), 8).map_err(|source| {
-            ConfigError::InvalidSocketMode {
-                value,
-                source,
-            }
-        })?,
+        Some(value) => u32::from_str_radix(value.trim_start_matches("0o"), 8)
+            .map_err(|source| ConfigError::InvalidSocketMode { value, source })?,
         None => DEFAULT_SOCKET_MODE,
     };
 
@@ -75,13 +71,11 @@ fn parse_socket_mode(value: Option<String>) -> Result<u32, ConfigError> {
 
 fn parse_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     match env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|source| ConfigError::InvalidInteger {
-                name,
-                value,
-                source,
-            }),
+        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
+            name,
+            value,
+            source,
+        }),
         Err(env::VarError::NotPresent) => Ok(default),
         Err(source) => Err(ConfigError::Environment { name, source }),
     }
@@ -89,13 +83,11 @@ fn parse_usize(name: &'static str, default: usize) -> Result<usize, ConfigError>
 
 fn parse_u64(name: &'static str, default: u64) -> Result<u64, ConfigError> {
     match env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|source| ConfigError::InvalidInteger {
-                name,
-                value,
-                source,
-            }),
+        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
+            name,
+            value,
+            source,
+        }),
         Err(env::VarError::NotPresent) => Ok(default),
         Err(source) => Err(ConfigError::Environment { name, source }),
     }

@@ -14,21 +14,14 @@ pub struct ServerService {
 
 impl ServerService {
     #[must_use]
-    pub fn new(
-        repository: ServerRepository,
-        reconcile_scheduler: ReconcileScheduler,
-    ) -> Self {
+    pub fn new(repository: ServerRepository, reconcile_scheduler: ReconcileScheduler) -> Self {
         Self {
             repository,
             reconcile_scheduler,
         }
     }
 
-    pub async fn create(
-        &self,
-        name: String,
-        spec: ServerSpec,
-    ) -> Result<Server, ApplicationError> {
+    pub async fn create(&self, name: String, spec: ServerSpec) -> Result<Server, ApplicationError> {
         let server = Server::new(ServerName::new(name)?, spec)?;
         self.repository.create(&server).await?;
         self.reconcile_scheduler.enqueue(server.id).await?;
@@ -96,10 +89,7 @@ pub enum ApplicationError {
     #[error("server not found")]
     NotFound,
     #[error("generation conflict: expected {expected:?}, actual {actual}")]
-    GenerationConflict {
-        expected: Option<u64>,
-        actual: u64,
-    },
+    GenerationConflict { expected: Option<u64>, actual: u64 },
     #[error("server was updated concurrently")]
     ConcurrentUpdate,
     #[error("persistence failed")]

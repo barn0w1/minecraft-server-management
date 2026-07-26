@@ -11,9 +11,7 @@ use tracing::error;
 
 use crate::{
     application::{ApplicationError, ServerService},
-    domain::{
-        ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerSpec,
-    },
+    domain::{ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerSpec},
 };
 
 #[derive(Debug, Clone)]
@@ -84,7 +82,10 @@ impl ClientRpcHandler {
             )));
         }
 
-        if !matches!(request.params, Value::Null | Value::Array(_) | Value::Object(_)) {
+        if !matches!(
+            request.params,
+            Value::Null | Value::Array(_) | Value::Object(_)
+        ) {
             return request.id.response_id().map(|id| {
                 response_value(Response::error(
                     id,
@@ -164,7 +165,8 @@ impl ClientRpcHandler {
 }
 
 fn parse_params<T: DeserializeOwned>(params: Value) -> Result<T, RpcDispatchError> {
-    serde_json::from_value(params).map_err(|error| RpcDispatchError::InvalidParams(error.to_string()))
+    serde_json::from_value(params)
+        .map_err(|error| RpcDispatchError::InvalidParams(error.to_string()))
 }
 
 fn require_no_params(params: &Value) -> Result<(), RpcDispatchError> {
@@ -278,20 +280,17 @@ enum RpcDispatchError {
 impl RpcDispatchError {
     fn into_error_object(self) -> ErrorObject {
         match self {
-            Self::MethodNotFound => ErrorObject::new(
-                json_rpc::error_code::METHOD_NOT_FOUND,
-                "Method not found",
-            ),
-            Self::InvalidParams(detail) => ErrorObject::new(
-                json_rpc::error_code::INVALID_PARAMS,
-                "Invalid params",
-            )
-            .with_data(json!({ "detail": detail })),
-            Self::Application(ApplicationError::Validation(error)) => ErrorObject::new(
-                json_rpc::error_code::INVALID_PARAMS,
-                "Invalid params",
-            )
-            .with_data(json!({ "detail": error.to_string() })),
+            Self::MethodNotFound => {
+                ErrorObject::new(json_rpc::error_code::METHOD_NOT_FOUND, "Method not found")
+            }
+            Self::InvalidParams(detail) => {
+                ErrorObject::new(json_rpc::error_code::INVALID_PARAMS, "Invalid params")
+                    .with_data(json!({ "detail": detail }))
+            }
+            Self::Application(ApplicationError::Validation(error)) => {
+                ErrorObject::new(json_rpc::error_code::INVALID_PARAMS, "Invalid params")
+                    .with_data(json!({ "detail": error.to_string() }))
+            }
             Self::Application(ApplicationError::NotFound) => {
                 ErrorObject::new(json_rpc::error_code::NOT_FOUND, "Server not found")
             }

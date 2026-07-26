@@ -239,10 +239,7 @@ pub enum ValidationError {
     #[error("{0} must not be blank")]
     BlankField(&'static str),
     #[error("{field} must be no longer than {maximum} characters")]
-    FieldTooLong {
-        field: &'static str,
-        maximum: usize,
-    },
+    FieldTooLong { field: &'static str, maximum: usize },
     #[error("{0} must not contain control characters")]
     ControlCharacter(&'static str),
     #[error("server generation must be greater than zero")]
