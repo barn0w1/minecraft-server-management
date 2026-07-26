@@ -23,7 +23,7 @@ pub struct ClientRpcHandler {
 
 impl ClientRpcHandler {
     #[must_use]
-    pub const fn new(server_service: ServerService) -> Self {
+    pub fn new(server_service: ServerService) -> Self {
         Self { server_service }
     }
 
@@ -74,7 +74,10 @@ impl ClientRpcHandler {
             }
         };
 
-        if request.jsonrpc != json_rpc::VERSION || request.method.is_empty() {
+        if request.jsonrpc != json_rpc::VERSION
+            || request.method.is_empty()
+            || !request.id.is_valid()
+        {
             return Some(response_value(Response::error(
                 request.id.response_id().unwrap_or(Value::Null),
                 ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid Request"),

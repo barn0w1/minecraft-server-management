@@ -177,7 +177,7 @@ struct SocketPathGuard {
 }
 
 impl SocketPathGuard {
-    const fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }

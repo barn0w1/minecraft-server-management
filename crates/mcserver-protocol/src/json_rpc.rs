@@ -33,6 +33,15 @@ impl RequestId {
             Self::Present(value) => Some(value.clone()),
         }
     }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        matches!(
+            self,
+            Self::Missing
+                | Self::Present(Value::Null | Value::Number(_) | Value::String(_))
+        )
+    }
 }
 
 fn deserialize_request_id<'de, D>(deserializer: D) -> Result<RequestId, D::Error>
@@ -121,6 +130,16 @@ mod tests {
         )?;
 
         assert!(request.id.is_notification());
+        Ok(())
+    }
+
+    #[test]
+    fn object_id_is_invalid() -> Result<(), serde_json::Error> {
+        let request = serde_json::from_str::<Request>(
+            r#"{"jsonrpc":"2.0","method":"system.ping","id":{}}"#,
+        )?;
+
+        assert!(!request.id.is_valid());
         Ok(())
     }
 

@@ -17,14 +17,11 @@ pub struct ReconcileScheduler {
 }
 
 impl ReconcileScheduler {
-    pub async fn enqueue(
-        &self,
-        server_id: ServerId,
-    ) -> Result<(), crate::application::ApplicationError> {
+    pub async fn enqueue(&self, server_id: ServerId) -> Result<(), ScheduleError> {
         self.sender
             .send(server_id)
             .await
-            .map_err(|_| crate::application::ApplicationError::ReconcileSchedulerUnavailable)
+            .map_err(|_| ScheduleError::Unavailable)
     }
 }
 
@@ -110,6 +107,12 @@ impl ReconcileWorker {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Error)]
+pub enum ScheduleError {
+    #[error("reconciliation scheduler is unavailable")]
+    Unavailable,
 }
 
 #[derive(Debug, Error)]

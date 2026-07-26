@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     domain::{Server, ServerId, ServerName, ServerSpec, ValidationError},
     infrastructure::{RepositoryError, ServerRepository},
-    reconciliation::ReconcileScheduler,
+    reconciliation::{ReconcileScheduler, ScheduleError},
 };
 
 #[derive(Debug, Clone)]
@@ -14,7 +14,7 @@ pub struct ServerService {
 
 impl ServerService {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         repository: ServerRepository,
         reconcile_scheduler: ReconcileScheduler,
     ) -> Self {
@@ -104,6 +104,6 @@ pub enum ApplicationError {
     ConcurrentUpdate,
     #[error("persistence failed")]
     Repository(#[from] RepositoryError),
-    #[error("reconciliation scheduler is unavailable")]
-    ReconcileSchedulerUnavailable,
+    #[error("reconciliation scheduling failed")]
+    ReconcileScheduling(#[from] ScheduleError),
 }

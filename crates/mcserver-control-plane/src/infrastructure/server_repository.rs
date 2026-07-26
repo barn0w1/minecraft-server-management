@@ -11,7 +11,7 @@ pub struct ServerRepository {
 
 impl ServerRepository {
     #[must_use]
-    pub const fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
