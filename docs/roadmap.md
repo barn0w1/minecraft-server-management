@@ -1,57 +1,62 @@
-# Implementation roadmap
+# Roadmap
 
-## Milestone 0: repository foundation
+## Completed: foundation and local vertical slice
 
-- Rust workspace and pinned toolchain
-- Separate control-plane, node-agent, and wire-protocol crates
-- Naming and module conventions
+- Rust workspace, edition 2024, Rust 1.97.1
+- Unix-socket client JSON-RPC
+- durable Server desired state with optimistic generation checks
+- reconciler-owned ServerInstance with active uniqueness and fencing
+- graceful control-plane shutdown and task supervision
+- loopback node-agent JSON-RPC with reconnect and registration token
+- local-process ComputeInstance provider
+- opaque restic restore and snapshot
+- direct rootless Podman execution of `itzg/minecraft-server`
+- fenced transactional snapshot publication
+- two-generation local E2E verifier
 
-## Milestone 1: durable Server desired state
+## Next: harden local operation
 
-- SQLite schema and migrations
-- Unix socket JSON-RPC server
-- `system.ping`
-- `server.create`, `server.get`, `server.list`
-- `server.set_desired_state`
-- optimistic generation checks
-- reconciliation scheduling boundary
+- run and fix `fmt`, `check`, `clippy`, and tests on the target Rust toolchain
+- execute the E2E verifier against real Podman/restic/Minecraft
+- add integration tests with fake Podman and restic executables
+- persist bounded operation attempts and improve per-Server retry backoff
+- expose read-only ComputeInstance and snapshot diagnostics if operationally needed
+- add a small `mcserverctl` client instead of relying on raw JSON
+- add structured metrics and an audit/event log
 
-## Milestone 2: ServerInstance reconciliation
+## Cloud node provider
 
-- durable `ServerInstance` records
-- database-enforced maximum of one active instance per `Server`
-- resolved copy of the source `Server` generation and specification
-- stop intent and terminal result represented as independent facts
-- fencing token for writable data ownership
-- read-only ServerInstance client API
-- cooperative `SIGINT` and `SIGTERM` shutdown
-- supervised core tasks and bounded shutdown waiting
-- system-wide Unix-millisecond timestamp convention
+- provider-neutral compute adapter
+- Akamai Cloud instance create, inspect, and delete
+- deterministic provider labels for idempotency after uncertain API responses
+- cloud-init or image-based node-agent installation
+- short-lived enrollment credentials and rotation
+- orphan instance discovery and cleanup
+- API rate-limit handling and bounded backoff
 
-## Milestone 3: ComputeInstance provider
+## Production node execution
 
-- provider-neutral compute contract
-- fake provider for deterministic reconciliation tests
-- Akamai Cloud implementation
-- durable create, inspect, and delete operations
-- idempotency and recovery after uncertain provider responses
+- replace direct Podman lifecycle with systemd and Quadlet where appropriate
+- preserve the existing agent protocol and opaque data boundary
+- explicit filesystem ownership and SELinux policy
+- node boot recovery and service supervision
+- log streaming and bounded retention
 
-## Milestone 4: node-agent transport
+## Object storage and data operations
 
-- explicit network trust and enrollment model
-- separate agent JSON-RPC namespace
-- durable command IDs and idempotent command handling
-- reconnect and stale-agent rejection
+- restic repository on an S3-compatible backend such as Cloudflare R2
+- credential delivery that does not place long-lived secrets in Server specs
+- retention policy and garbage collection
+- scheduled repository integrity checks
+- snapshot listing and deliberate rollback API
+- disaster-recovery documentation
 
-## Milestone 5: opaque data operations
+## Multi-client operation
 
-- restore and snapshot operations
-- restic repository integration
-- object storage integration
-- safe handoff of the authoritative writable copy
+- Unix-socket authorization by owner/group
+- `mcserverctl`
+- Discord bot using the same client API
+- optional remote authenticated client gateway
+- audit identity and idempotency keys for mutating requests
 
-## Milestone 6: Minecraft process execution
-
-- systemd, Podman, and Quadlet integration
-- minimal `itzg/minecraft-server` environment configuration
-- readiness, stop, and crash observation
+The roadmap should continue to prefer complete vertical capabilities over broad generic abstractions. New resources are introduced only when the existing model can no longer express an independent lifecycle safely.

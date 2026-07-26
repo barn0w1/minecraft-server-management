@@ -2,43 +2,27 @@
 
 ## Naming
 
-Rust naming follows the standard conventions:
+Follow standard Rust conventions:
 
-- crates and packages: `kebab-case`
-- modules, functions, variables, and database columns: `snake_case`
-- types, traits, and enum variants: `UpperCamelCase`
+- packages: `kebab-case`
+- modules, functions, variables, SQL columns, and JSON fields: `snake_case`
+- types, traits, and variants: `UpperCamelCase`
 - constants: `SCREAMING_SNAKE_CASE`
-- resource identifiers: singular resource name plus `Id`, such as `ServerId`
+- identifiers: singular resource name plus `Id`
+- JSON-RPC methods: `resource.verb`
 
-Project terminology is intentionally narrow:
+Project terms:
 
-- `Server`: the durable client-facing aggregate containing desired state and opaque data/configuration references.
-- `ServerInstance`: one materialization of a `Server`; it is not a VM and it is not called a runtime.
-- `ComputeInstance`: one provider VM.
-- `Snapshot`: one durable generation of opaque server data.
-- `generation`: the version of client-controlled desired state.
-- `observed_generation`: reserved for status written by a reconciler.
-- `fencing_token`: a monotonically increasing token that rejects stale writers.
-
-JSON-RPC methods use `resource.verb` in lower snake case, for example `server.set_desired_state`. JSON fields use `snake_case`.
-
-Database tables use plural `snake_case`. Foreign-key columns use the singular resource name plus `_id`.
-
-## Time and duration
-
-Use one wall-clock representation throughout the system:
-
-- Rust domain type: `UnixTimestampMillis`
-- persisted representation: SQLite `INTEGER`
-- wire representation: JSON integer
-- unit: milliseconds since `1970-01-01T00:00:00Z`
-- timestamp field suffix: `_at_ms` in SQL and JSON
-
-Use `Duration` for intervals, deadlines, retry delays, and shutdown timeouts. Do not subtract wall-clock timestamps to measure elapsed time and do not store local time-zone values.
+- `Server`: durable client-facing desired state plus convenient opaque configuration.
+- `ServerInstance`: one materialization; do not call it a runtime.
+- `ComputeInstance`: one temporary execution allocation.
+- `Snapshot`: one durable opaque data generation.
+- `generation`: client-controlled desired-state revision.
+- `fencing_token`: monotonically increasing Server-scoped writer token.
 
 ## Module layout
 
-For modules with child modules, use the modern file-plus-directory layout:
+Use the file-plus-directory module layout and do not add `mod.rs`:
 
 ```text
 application.rs
@@ -46,43 +30,66 @@ application/
 └── server_service.rs
 ```
 
-Do not introduce `mod.rs`. The named root file declares child modules and defines the module's public surface through explicit re-exports.
+The root file declares child modules and explicitly re-exports the public surface.
 
 ## Boundaries
 
-- Domain code must not depend on JSON-RPC wire DTOs.
-- Protocol crates contain wire types only and must not own business rules.
-- Unix socket handling must not contain persistence or domain decisions.
-- Cloud, systemd, Podman, restic, and object-storage details belong behind infrastructure boundaries.
-- Minecraft server data remains opaque. Do not add file-specific behavior without an explicit decision.
-- Reconciler-owned resources are read-only through the client API unless a clear client-owned field is introduced.
+- Domain code does not depend on wire DTOs, SQLx, Tokio, Podman, or restic.
+- `mcserver-protocol` owns wire types only, not business rules.
+- Transport handlers delegate to application services or infrastructure adapters.
+- External command details stay in the node-agent executor.
+- `/data` remains opaque.
+- Reconciler-owned resources are read-only through the client API.
+- Add a resource only when it has a genuinely independent lifecycle, identity, sharing model, or API.
 
-## SQL construction
+## State and reconciliation
 
-Pass fixed SQL to SQLx as string literals or `&'static str` constants, and pass values only through bind parameters. Use `QueryBuilder` when the SQL structure genuinely must be assembled at runtime. Do not use `AssertSqlSafe` merely to silence the type system; it requires an explicit security review of the generated SQL.
+- The database is authoritative; queue sends are best effort.
+- External operations must be idempotent or recoverable after uncertain responses.
+- Persist observations, not one combined global phase.
+- Isolate a Server's reconciliation error from the daemon and other Servers.
+- Enforce concurrency invariants in SQLite as well as in code.
+- Validate fencing tokens before publishing authoritative data.
 
-## State modeling
+## Time
 
-Do not create one phase enum that combines Server, ServerInstance, ComputeInstance, agent connection, data operations, and process state.
+- persistent wall clock: `UnixTimestampMillis`
+- SQL/JSON representation: non-negative integer milliseconds since Unix epoch
+- names: `*_at_ms`
+- durations/deadlines/backoff: `Duration` and monotonic timers
+- create timestamps at the boundary where the corresponding fact is observed
+- preserve chronological ordering when persisting after wall-clock rollback
 
-Prefer independent durable facts and conditions. Reconcilers compare desired state with observed facts and request idempotent operations.
+## SQL
 
-Database constraints enforce invariants that must survive concurrent workers, including the maximum of one active `ServerInstance` per `Server`.
+Use SQL literals or `&'static str` constants with bind parameters. Use `QueryBuilder` only when SQL structure must be dynamic. Do not use `AssertSqlSafe` merely to bypass SQLx auditing.
+
+Schema constraints must mirror domain invariants. Migration files are immutable after release; during the current pre-release phase, this repository may intentionally replace the experimental schema when the change is documented.
+
+## External processes
+
+- use argument APIs, never shell interpolation
+- set `kill_on_drop(true)` for bounded command execution
+- capture stdout/stderr and include a bounded diagnostic on failure
+- use deterministic resource names and provider labels
+- verify an untracked PID still belongs to the intended local agent before signaling it
+- treat timeout responses as uncertain and do not reuse a desynchronized RPC session
 
 ## Daemon lifecycle
 
-Core services must participate in cooperative shutdown. New long-running tasks must:
+Long-running tasks must observe a shared cancellation token, stop accepting new work, drain safely, and be supervised. Durable consistency must not depend on abrupt process termination.
 
-- observe the shared shutdown signal
-- stop accepting new work
-- finish or safely abandon the current idempotent operation
-- be supervised so unexpected termination stops the daemon
-- not depend on process termination for durable consistency
+Control-plane shutdown deliberately leaves active local agents and Minecraft containers running so they can reconnect. Explicit Server desired state controls Minecraft shutdown.
 
-## Git history
+## Git
 
-Commits should be small enough to review and use imperative Conventional Commit subjects where practical. Repository commits use:
+Use reviewable imperative Conventional Commit subjects where practical. Author and committer identity:
 
 ```text
 barn0w1 <yuito.kiuchi.dev@gmail.com>
 ```
+
+## External command conventions
+
+- Node-agent restic commands use `--retry-lock`; `MCSERVER_NODE_AGENT_RESTIC_RETRY_LOCK_SECONDS` defaults to 300 seconds.
+- Command timeout and repository-lock wait are durations, never persisted wall-clock timestamps.

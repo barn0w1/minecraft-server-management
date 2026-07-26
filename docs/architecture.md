@@ -1,65 +1,126 @@
-# Initial architecture
+# Architecture
 
-## Design boundary
+## Boundary
 
 A `Server` is the durable, client-facing aggregate that says:
 
-> Run this opaque server data with this minimum execution and compute configuration.
+> Run this opaque Minecraft data with this minimum process and compute configuration.
 
-The aggregate is intentionally convenient rather than ontologically pure. Data, compute configuration, and process configuration may become separate resources later only when they gain an independent lifecycle, sharing model, or API.
+The aggregate is intentionally convenient rather than ontologically pure. Data and launch settings remain embedded until they require an independent lifecycle, sharing model, or client API.
 
-The system does not parse or manage arbitrary files under the Minecraft server data directory. Humans remain responsible for Minecraft-specific configuration consistency.
+The system does not interpret arbitrary files under `/data`. Humans remain responsible for Minecraft-specific configuration consistency.
 
-## Resource direction
+## Resources
 
-The initial resource model is deliberately small:
+### Server
 
-- `Server`: durable desired state, data reference, and minimum launch configuration.
-- `ServerInstance`: one reconciler-owned materialization record for a `Server`.
-- `ComputeInstance`: a temporary VM with its own lifecycle; planned.
-- `Snapshot`: a durable generation of opaque server data; planned.
+Client-owned and durable. It contains:
 
-At most one active `ServerInstance` may exist for a `Server`. SQLite enforces this with a partial unique index rather than relying on an application-level precondition.
+- `desired_state`: `running` or `stopped`
+- local compute selection
+- minimum itzg container settings
+- opaque restic repository reference
+- current authoritative snapshot ID
+- optimistic `generation`
 
-Each instance snapshots the source Server generation and resolved specification. A per-Server fencing token increases for every new instance. Future data and agent operations must present that token so stale instances cannot publish authoritative results.
+Changing desired state returns after the database commit. It does not wait for external work.
 
-## Reconciliation
+### ServerInstance
 
-Clients mutate desired state. They do not execute a long imperative workflow through one RPC call.
+Reconciler-owned and durable. It represents one materialization of a Server and records:
 
-The control plane reacts immediately to resource changes and periodically resynchronizes all servers. Reconcilers observe durable state and apply at most one idempotent transition at a time, repeating until the resource is locally stable.
+- the source Server generation and resolved specification
+- the source and result snapshot IDs
+- a monotonically increasing Server-scoped fencing token
+- independent observations for data preparation and process execution
+- stop intent, errors, and terminal result
 
-Current behavior is intentionally narrow:
+SQLite enforces at most one active ServerInstance per Server.
 
-- desired `running` with no active instance creates one instance
-- desired `stopped` requests stop on the active instance
-- a stop-requested instance is marked completed
+### ComputeInstance
 
-Termination currently completes immediately because compute and node-agent operations do not exist yet. Later reconcilers will replace that placeholder transition with durable observed facts. No single linear lifecycle or global state-machine enum represents the whole system.
+Reconciler-owned and temporary. The current `local_process` provider maps one ComputeInstance to one `mcserver-node-agent` child process and its private state directory.
 
-## Time model
+ComputeInstance and ServerInstance lifecycles are separate. A ComputeInstance can disappear or be recreated while a ServerInstance remains active, provided writable data has not been lost.
 
-Persistent timestamps and API event timestamps use signed 64-bit milliseconds since the Unix epoch. Domain code wraps them in `UnixTimestampMillis`; database and JSON field names use the `_at_ms` suffix.
+### Snapshot
 
-Wall-clock timestamps are never used for retry intervals, timeouts, or elapsed-time measurement. Those use `Duration` and Tokio's monotonic timer facilities.
+A restic snapshot is published only by the active ServerInstance holding the matching fencing token. Publication updates the instance result and `Server.current_snapshot_id` in one SQLite transaction.
 
-## Process lifecycle
+## Desired state and reconciliation
 
-The control plane listens for both `SIGINT` and `SIGTERM`. Shutdown is cooperative:
+The database is the source of truth. Queue notifications only reduce latency; periodic resynchronization recovers missed notifications and process restarts.
 
-1. stop accepting new Unix socket connections
-2. allow an in-flight JSON-RPC request to finish
-3. stop reconciliation after its current operation
-4. wait for connection and worker tasks up to the configured timeout
-5. close the SQLite pool and remove the Unix socket path
+Each reconcile step performs at most one idempotent transition and then observes again. There is no global phase enum combining Server, instance, compute, agent, data, and process state.
 
-An unexpected exit of either core service terminates the daemon instead of leaving a partially functioning process.
+Running converges through these facts:
+
+```text
+active ServerInstance exists
+active local ComputeInstance exists
+node agent is connected
+/data is prepared from source_snapshot_id or empty initialization
+Minecraft container is observed running
+```
+
+Stopping converges through these facts:
+
+```text
+stop intent recorded
+Minecraft container observed stopped
+restic snapshot created and fenced publication committed
+container removed
+node agent and local ComputeInstance removed
+ServerInstance completed
+```
+
+A reconcile failure is isolated to its Server, stored as `last_error`, and retried. It does not stop the daemon.
+
+## Data authority
+
+```text
+Server stopped:
+  Server.current_snapshot_id is authoritative.
+
+Server running:
+  the active fenced ServerInstance's /data is the only writable copy.
+
+Stop completed:
+  the newly published snapshot becomes authoritative.
+```
+
+If the control plane loses the only compute holding prepared writable data before a result snapshot is published, it refuses to silently recreate from an older snapshot and reports writable-data loss.
 
 ## Interfaces
 
-There are two separate JSON-RPC interfaces:
+Two JSON-RPC interfaces are intentionally separate:
 
-1. Client API: human tools, CLI programs, and bots connect to the control plane over a local Unix socket.
-2. Agent API: the control plane communicates with remote node agents over a network transport that has not yet been selected.
+1. Client API: local human tools and bots use a Unix socket.
+2. Agent API: node agents initiate a network connection to the control plane.
 
-These interfaces may share JSON-RPC envelope code, but not method namespaces, DTOs, authentication, framing, or versioning policy.
+They share the JSON-RPC envelope only. Their DTOs, methods, framing, trust boundary, and versioning are separate.
+
+The local agent listener binds only to a loopback address. Each ComputeInstance has a random connection token and a protocol version check. A reconnect replaces the old in-memory session for that ComputeInstance.
+
+## Time model
+
+Persistent wall-clock timestamps use a single representation:
+
+- domain: `UnixTimestampMillis`
+- SQLite: non-negative `INTEGER`
+- JSON: non-negative integer
+- unit: milliseconds since the Unix epoch
+- field suffix: `_at_ms`
+
+Timeouts, backoff, polling, and elapsed time use `Duration` and monotonic timers. Repository updates preserve per-resource chronological ordering if the wall clock moves backwards.
+
+## Process shutdown
+
+The control plane handles `SIGINT` and `SIGTERM` cooperatively:
+
+1. stop accepting client and agent connections
+2. stop reconciliation after its current idempotent operation
+3. drain supervised tasks up to a configured deadline
+4. close SQLite and remove the Unix socket
+
+Control-plane shutdown does not intentionally stop active Minecraft containers or local agents. The agents reconnect after the control plane restarts, allowing reconciliation to continue from durable state.

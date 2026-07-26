@@ -2,24 +2,35 @@
 
 A Rust control plane and node agent for running temporary Minecraft server compute while keeping server data persistent.
 
-The project deliberately treats the contents of a Minecraft server data directory as opaque. The system manages ownership, snapshots, compute allocation, and process execution without trying to understand or rewrite every Minecraft, mod, or plugin configuration file.
+The system deliberately treats the Minecraft `/data` directory as opaque. It owns restore, exclusive execution, snapshot publication, and process lifecycle, but it does not parse or rewrite arbitrary Minecraft, mod, plugin, or world files.
 
-## Current foundation
+## Implemented local vertical slice
 
-- Rust 2024 edition, pinned to Rust 1.97.1
-- `mcserver-control-plane`: persistent desired-state API over JSON-RPC 2.0 on a Unix socket
-- `mcserver-node-agent`: daemon boundary reserved for remote node execution
-- `mcserver-protocol`: wire-only JSON-RPC types
-- SQLite persistence for durable `Server` and reconciler-owned `ServerInstance` resources
-- Cooperative `SIGINT`/`SIGTERM` shutdown with bounded task draining
-
-The control-plane client socket defaults to:
+The current code can execute this complete flow on one Linux host:
 
 ```text
-/run/mcserver/control-plane.sock
+client JSON-RPC over Unix socket
+  -> Server desired_state = running
+  -> reconciler creates one active ServerInstance
+  -> local ComputeInstance spawns mcserver-node-agent
+  -> node agent restores the Server snapshot with restic, or creates empty /data
+  -> node agent starts itzg/minecraft-server with Podman
+  -> Server desired_state = stopped
+  -> node agent stops Minecraft
+  -> node agent creates a restic snapshot
+  -> control plane publishes it after checking the fencing token
+  -> container and local node-agent resources are removed
+  -> ServerInstance is completed
 ```
 
-Each socket frame is one complete JSON value followed by a newline. A frame may contain one JSON-RPC request or a JSON-RPC batch.
+Starting the same Server again resolves the new instance from the previously published snapshot.
+
+The resource model remains small:
+
+- `Server`: durable client-owned desired state and convenient opaque launch/data configuration.
+- `ServerInstance`: one reconciler-owned materialization of a Server. At most one is active per Server.
+- `ComputeInstance`: one temporary execution allocation. The implemented provider is `local_process`.
+- `Snapshot`: one durable restic snapshot published by an active fenced ServerInstance.
 
 ## Workspace
 
@@ -30,37 +41,84 @@ crates/
 └── mcserver-protocol/
 ```
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/development.md`](docs/development.md), and [`docs/roadmap.md`](docs/roadmap.md).
+- Rust edition: 2024
+- pinned toolchain: Rust 1.97.1
+- client API: JSON-RPC 2.0 over `/run/mcserver/control-plane.sock`
+- local agent API: separate JSON-RPC 2.0 connection over loopback TCP
+- persistence: SQLite
+- local data snapshots: restic
+- local Minecraft execution: rootless Podman and `itzg/minecraft-server`
 
-## Local development configuration
+## Local prerequisites
 
-The production defaults use `/run/mcserver` and `/var/lib/mcserver`. For an unprivileged local run, override them:
+Install and configure these in the same user account that runs the control plane:
+
+- Rust 1.97.1
+- Podman
+- restic
+- Python 3 for the included E2E verifier
+
+Confirm that rootless Podman works before testing:
 
 ```bash
+podman info
+restic version
+```
+
+Minecraft requires explicit acceptance of its EULA. The API therefore rejects a Server specification unless `accept_eula` is `true`. Only set it after reading and accepting the Minecraft EULA.
+
+## Build and run locally
+
+This branch replaces the experimental migration history with a new initial schema. Remove a database created by an earlier revision before starting this version.
+
+```bash
+cargo build --workspace
+
+rm -rf var
 mkdir -p var
+
+export RESTIC_PASSWORD='local-development-only'
 export MCSERVER_CONTROL_PLANE_SOCKET="$PWD/var/control-plane.sock"
 export MCSERVER_CONTROL_PLANE_DATABASE_URL="sqlite://$PWD/var/control-plane.db?mode=rwc"
-export MCSERVER_CONTROL_PLANE_SHUTDOWN_TIMEOUT_SECONDS=15
-export RUST_LOG=mcserver_control_plane=debug
-cargo run -p mcserver-control-plane
+export MCSERVER_CONTROL_PLANE_AGENT_LISTEN_ADDRESS='127.0.0.1:39001'
+export MCSERVER_CONTROL_PLANE_NODE_AGENT_BINARY="$PWD/target/debug/mcserver-node-agent"
+export MCSERVER_CONTROL_PLANE_NODE_AGENT_ROOT="$PWD/var/local-agents"
+export RUST_LOG='mcserver_control_plane=debug,mcserver_node_agent=info'
+
+target/debug/mcserver-control-plane
 ```
 
-Example request frame:
+The control plane passes its environment to local node-agent processes, including restic credentials such as `RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, and backend-specific credentials.
 
-```json
-{"jsonrpc":"2.0","method":"system.ping","id":1}
+In another terminal, run the two-generation E2E verifier:
+
+```bash
+export RESTIC_PASSWORD='local-development-only'
+python3 scripts/local_e2e.py \
+  --socket "$PWD/var/control-plane.sock" \
+  --repository "$PWD/var/restic-repository" \
+  --host-port 25565
 ```
 
-Create a durable server resource:
+The verifier performs two complete start/stop cycles. It checks Minecraft's TCP port by default, verifies snapshot publication, verifies that the next fencing token increases, and verifies that the second instance uses the first snapshot as its source.
 
-```json
-{"jsonrpc":"2.0","method":"server.create","params":{"name":"community","spec":{"compute":{"region":"jp-osa","instance_type":"g6-standard-2","image":"debian-13"},"process":{"container_image":"docker.io/itzg/minecraft-server:latest","server_type":"VANILLA","version":"LATEST","environment":{}},"data":{"repository":"r2:mcserver/community"}}},"id":2}
+For a faster infrastructure-only check that does not wait for Minecraft to accept TCP connections:
+
+```bash
+python3 scripts/local_e2e.py \
+  --socket "$PWD/var/control-plane.sock" \
+  --repository "$PWD/var/restic-repository" \
+  --host-port 25565 \
+  --skip-port-check
 ```
 
-Set desired state using an optional optimistic generation check:
+## Validation
 
-```json
-{"jsonrpc":"2.0","method":"server.set_desired_state","params":{"server_id":"00000000-0000-0000-0000-000000000000","desired_state":"running","expected_generation":1},"id":3}
+```bash
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace
+python3 -m py_compile scripts/local_e2e.py
 ```
 
-The reconciler materializes at most one active `ServerInstance` for a running Server and preserves instance history with a fencing token. `server_instance.get` and `server_instance.list` expose that read-only state.
+See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), and [roadmap](docs/roadmap.md).

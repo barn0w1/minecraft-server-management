@@ -1,56 +1,99 @@
 # Client JSON-RPC API
 
-## Transport and framing
+## Transport
 
-The client API uses JSON-RPC 2.0 over a Unix stream socket. JSON-RPC itself does not define stream framing, so this project uses one UTF-8 JSON value per line.
+The client API uses JSON-RPC 2.0 over a Unix stream socket.
 
-- Default path: `/run/mcserver/control-plane.sock`
-- Default mode: `0660`
-- Maximum frame size: 1 MiB by default
-- A line may contain one request object or one batch array
-- Notifications produce no response
-- Responses are also one JSON value per line
+- default path: `/run/mcserver/control-plane.sock`
+- default mode: `0660`
+- framing: one UTF-8 JSON value followed by `\n`
+- default maximum frame: 1 MiB
+- one frame can be a request object or batch array
+- notifications produce no response
 
-## Timestamp representation
-
-All API fields ending in `_at_ms` are signed 64-bit Unix timestamps in milliseconds. They represent wall-clock event time. Durations and timeouts are configuration values expressed in seconds and are not timestamps.
+All fields ending in `_at_ms` are non-negative Unix timestamps in milliseconds.
 
 ## Methods
 
 ### `system.ping`
 
-No params. Returns process status and package version.
+No params.
 
 ### `server.create`
 
-Creates a durable `Server` in desired state `stopped`. The data repository is opaque to the control plane.
+Creates a durable Server in desired state `stopped`.
+
+Example:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "server.create",
+  "params": {
+    "name": "community",
+    "spec": {
+      "compute": { "provider": "local" },
+      "process": {
+        "container_image": "docker.io/itzg/minecraft-server:latest",
+        "server_type": "VANILLA",
+        "version": "LATEST",
+        "host_port": 25565,
+        "stop_timeout_seconds": 60,
+        "accept_eula": true,
+        "environment": {}
+      },
+      "data": {
+        "repository": "/absolute/path/to/restic-repository"
+      }
+    }
+  },
+  "id": 1
+}
+```
+
+The following environment keys are system-owned and rejected in `environment`:
+
+- `EULA`
+- `TYPE`
+- `VERSION`
+- `SKIP_SERVER_PROPERTIES`
+
+The system sets `SKIP_SERVER_PROPERTIES=TRUE`; files under `/data`, including `server.properties`, remain outside the control-plane configuration model.
 
 ### `server.get`
 
-Returns one server by UUID.
+Params: `server_id` UUID.
 
 ### `server.list`
 
-Returns all servers, ordered by name and UUID.
+No params. Returns Servers ordered by name and UUID.
 
 ### `server.set_desired_state`
 
-Sets `running` or `stopped`. An optional `expected_generation` provides optimistic concurrency control. A successful state change increments `generation`; setting the same value is idempotent and does not increment it.
+Params:
 
-The method records desired state and returns without waiting for materialization. The reconciler creates or terminates `ServerInstance` records asynchronously.
+- `server_id`
+- `desired_state`: `running` or `stopped`
+- optional `expected_generation`
+
+A successful change increments `generation`. Setting the same state is idempotent. The response confirms the durable desired-state update, not completion of external operations.
 
 ### `server_instance.get`
 
-Returns one reconciler-owned `ServerInstance` by UUID. Clients cannot create or mutate instances directly.
+Params: `server_instance_id` UUID. Read-only.
 
 ### `server_instance.list`
 
-Lists the complete instance history for one `server_id`, newest first. At most one returned instance can have `terminated_at_ms = null`.
+Params: `server_id` UUID. Returns complete history newest first. At most one item has `terminated_at_ms = null`.
 
-A `ServerInstance` contains:
+Useful observed fields include:
 
-- the source `server_generation`
-- a resolved copy of the source `ServerSpec`
-- a monotonically increasing `fencing_token` scoped to the server
-- independent stop-request and terminal facts
-- creation and update timestamps
+- `source_snapshot_id`
+- `data_prepared_at_ms`
+- `process_running`
+- `process_observed_at_ms`
+- `result_snapshot_id`
+- `last_error`
+- `stop_requested_at_ms`
+- `terminated_at_ms`
+- `terminal_result`
