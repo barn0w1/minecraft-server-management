@@ -56,7 +56,7 @@ impl Config {
             "MCSERVER_CONTROL_PLANE_SHUTDOWN_TIMEOUT_SECONDS",
             DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
         )?;
-        let agent_listen_address = optional_string(
+        let agent_listen_address: SocketAddr = optional_string(
             "MCSERVER_CONTROL_PLANE_AGENT_LISTEN_ADDRESS",
             DEFAULT_AGENT_LISTEN_ADDRESS,
         )?

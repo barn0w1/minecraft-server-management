@@ -286,7 +286,7 @@ async fn run_session(
                     "id": id,
                 });
                 let result = async {
-                    write_value(writer, &request).await?;
+                    write_command_request(writer, &request).await?;
                     let response = read_wire_response(reader, max_frame_bytes).await?;
                     if response.jsonrpc != json_rpc::VERSION {
                         return Err(AgentCallError::Protocol(
@@ -426,6 +426,16 @@ async fn write_response(
     response: &Response,
 ) -> Result<(), AgentServerError> {
     write_value(writer, &serde_json::to_value(response)?).await
+}
+
+async fn write_command_request(
+    writer: &mut WriteHalf<TcpStream>,
+    request: &Value,
+) -> Result<(), AgentCallError> {
+    writer.write_all(&serde_json::to_vec(request)?).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 async fn write_value(
