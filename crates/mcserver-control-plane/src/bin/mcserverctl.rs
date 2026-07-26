@@ -41,12 +41,8 @@ async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliE
         Command::ServerInstances { server_id } => {
             call_server_id(client, method::SERVER_INSTANCE_LIST, server_id).await
         }
-        Command::ServerStart { server_id } => {
-            set_desired_state(client, server_id, "running").await
-        }
-        Command::ServerStop { server_id } => {
-            set_desired_state(client, server_id, "stopped").await
-        }
+        Command::ServerStart { server_id } => set_desired_state(client, server_id, "running").await,
+        Command::ServerStop { server_id } => set_desired_state(client, server_id, "stopped").await,
         Command::ServerCreate(options) => {
             let params = json!({
                 "name": options.name,
@@ -120,9 +116,11 @@ impl Invocation {
         let mut positional = Vec::new();
         while let Some(argument) = arguments.next() {
             if argument == "--socket" {
-                socket_path = PathBuf::from(arguments.next().ok_or(CliError::MissingFlagValue(
-                    "--socket",
-                ))?);
+                socket_path = PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or(CliError::MissingFlagValue("--socket"))?,
+                );
             } else if argument == "--help" || argument == "-h" {
                 return Err(CliError::Usage);
             } else {
@@ -153,9 +151,7 @@ enum Command {
 fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
     match arguments.as_slice() {
         [command] if command == "ping" => Ok(Command::Ping),
-        [resource, action] if resource == "server" && action == "list" => {
-            Ok(Command::ServerList)
-        }
+        [resource, action] if resource == "server" && action == "list" => Ok(Command::ServerList),
         [resource, action, id]
             if resource == "server"
                 && matches!(
@@ -211,8 +207,8 @@ impl CreateOptions {
                     accept_eula = true;
                     index += 1;
                 }
-                "--name" | "--repository" | "--image" | "--type" | "--version"
-                | "--port" | "--stop-timeout" | "--env" => {
+                "--name" | "--repository" | "--image" | "--type" | "--version" | "--port"
+                | "--stop-timeout" | "--env" => {
                     let value = arguments
                         .get(index + 1)
                         .ok_or_else(|| CliError::MissingFlagValueOwned(flag.to_owned()))?;
@@ -223,23 +219,23 @@ impl CreateOptions {
                         "--type" => server_type = value.clone(),
                         "--version" => version = value.clone(),
                         "--port" => {
-                            host_port = value.parse().map_err(|source| CliError::InvalidInteger {
-                                flag: "--port",
-                                value: value.clone(),
-                                source,
-                            })?;
+                            host_port =
+                                value.parse().map_err(|source| CliError::InvalidInteger {
+                                    flag: "--port",
+                                    value: value.clone(),
+                                    source,
+                                })?;
                             if host_port == 0 {
                                 return Err(CliError::ZeroValue("--port"));
                             }
                         }
                         "--stop-timeout" => {
-                            stop_timeout_seconds = value.parse().map_err(|source| {
-                                CliError::InvalidInteger {
+                            stop_timeout_seconds =
+                                value.parse().map_err(|source| CliError::InvalidInteger {
                                     flag: "--stop-timeout",
                                     value: value.clone(),
                                     source,
-                                }
-                            })?;
+                                })?;
                             if stop_timeout_seconds == 0 {
                                 return Err(CliError::ZeroValue("--stop-timeout"));
                             }

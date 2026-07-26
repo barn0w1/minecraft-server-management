@@ -92,10 +92,8 @@ impl Config {
         let podman_binary = env::var_os("MCSERVER_CONTROL_PLANE_PODMAN_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
-        let local_scope = optional_non_blank(
-            "MCSERVER_CONTROL_PLANE_LOCAL_SCOPE",
-            DEFAULT_LOCAL_SCOPE,
-        )?;
+        let local_scope =
+            optional_non_blank("MCSERVER_CONTROL_PLANE_LOCAL_SCOPE", DEFAULT_LOCAL_SCOPE)?;
         let reap_orphans_on_start = parse_bool(
             "MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START",
             DEFAULT_REAP_ORPHANS_ON_START,

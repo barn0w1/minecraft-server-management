@@ -339,9 +339,7 @@ fn protocol_compute_instance(compute: ComputeInstance) -> ComputeInstanceResourc
         server_instance_id: compute.server_instance_id.as_uuid(),
         process_id: compute.process_id,
         agent_connected_at_ms: compute.agent_connected_at.map(|value| value.as_millis()),
-        shutdown_requested_at_ms: compute
-            .shutdown_requested_at
-            .map(|value| value.as_millis()),
+        shutdown_requested_at_ms: compute.shutdown_requested_at.map(|value| value.as_millis()),
         terminated_at_ms: compute.terminated_at.map(|value| value.as_millis()),
         terminal_result: compute
             .terminal_result

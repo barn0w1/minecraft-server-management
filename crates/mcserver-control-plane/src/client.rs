@@ -84,12 +84,9 @@ impl UnixRpcClient {
             .saturating_add(1);
         let mut reader = BufReader::new(reader.take(read_limit));
         let mut response = Vec::new();
-        let read = tokio::time::timeout(
-            self.timeout,
-            reader.read_until(b'\n', &mut response),
-        )
-        .await
-        .map_err(|_| RpcClientError::Timeout("waiting for control-plane response"))??;
+        let read = tokio::time::timeout(self.timeout, reader.read_until(b'\n', &mut response))
+            .await
+            .map_err(|_| RpcClientError::Timeout("waiting for control-plane response"))??;
         if read == 0 {
             return Err(RpcClientError::Disconnected);
         }
@@ -123,7 +120,10 @@ impl UnixRpcClient {
             ));
         }
         if let Some(error) = response.get("error") {
-            let code = error.get("code").and_then(Value::as_i64).unwrap_or_default();
+            let code = error
+                .get("code")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
             let message = error
                 .get("message")
                 .and_then(Value::as_str)
@@ -178,8 +178,8 @@ mod tests {
     use super::UnixRpcClient;
 
     #[tokio::test]
-    async fn sends_one_framed_request_and_decodes_the_result(
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn sends_one_framed_request_and_decodes_the_result()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
         let socket_path = temporary_socket_path();
         let listener = UnixListener::bind(&socket_path)?;
         let server = tokio::spawn({
@@ -194,9 +194,7 @@ mod tests {
                 assert_eq!(request["method"], "test.echo");
                 assert_eq!(request["params"], json!({ "value": 7 }));
                 writer
-                    .write_all(
-                        b"{\"jsonrpc\":\"2.0\",\"result\":{\"value\":7},\"id\":1}\n",
-                    )
+                    .write_all(b"{\"jsonrpc\":\"2.0\",\"result\":{\"value\":7},\"id\":1}\n")
                     .await?;
                 writer.flush().await?;
                 tokio::fs::remove_file(socket_path).await?;

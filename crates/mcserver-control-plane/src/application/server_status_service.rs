@@ -1,9 +1,7 @@
 use crate::{
     agent::AgentRegistry,
     domain::{ComputeInstance, Server, ServerId, ServerInstance},
-    infrastructure::{
-        ComputeInstanceRepository, ServerInstanceRepository, ServerRepository,
-    },
+    infrastructure::{ComputeInstanceRepository, ServerInstanceRepository, ServerRepository},
 };
 
 use super::ApplicationError;

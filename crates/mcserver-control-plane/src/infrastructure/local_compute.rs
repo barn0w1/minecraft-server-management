@@ -184,8 +184,7 @@ impl LocalComputeManager {
             }
             self.remove_state_directory_in_user_namespace(&entry.path())
                 .await?;
-            summary.state_directories_removed =
-                summary.state_directories_removed.saturating_add(1);
+            summary.state_directories_removed = summary.state_directories_removed.saturating_add(1);
             info!(compute_instance_id = %compute_id, "removed orphaned local compute state");
         }
         Ok(summary)
@@ -354,9 +353,9 @@ impl LocalComputeManager {
         }
 
         match compute.process_id {
-            Some(process_id) => Ok(
-                process_matches_compute(process_id, compute.id, &self.local_scope).await?,
-            ),
+            Some(process_id) => {
+                Ok(process_matches_compute(process_id, compute.id, &self.local_scope).await?)
+            }
             None => Ok(false),
         }
     }

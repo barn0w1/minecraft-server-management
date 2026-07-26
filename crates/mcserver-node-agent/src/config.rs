@@ -50,10 +50,8 @@ impl Config {
             ));
         }
         let state_directory = PathBuf::from(required("MCSERVER_NODE_AGENT_STATE_DIRECTORY")?);
-        let local_scope = optional_non_blank(
-            "MCSERVER_NODE_AGENT_LOCAL_SCOPE",
-            DEFAULT_LOCAL_SCOPE,
-        )?;
+        let local_scope =
+            optional_non_blank("MCSERVER_NODE_AGENT_LOCAL_SCOPE", DEFAULT_LOCAL_SCOPE)?;
         let podman_binary = env::var_os("MCSERVER_NODE_AGENT_PODMAN_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
