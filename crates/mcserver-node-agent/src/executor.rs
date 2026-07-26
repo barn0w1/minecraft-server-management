@@ -283,6 +283,12 @@ impl AgentExecutor {
             .config
             .state_directory
             .join(PREVIOUS_DATA_DIRECTORY_NAME);
+        let data = self.data_directory();
+
+        // Recover an interrupted directory swap before discarding stale staging data.
+        if !path_exists(&data).await? && path_exists(&previous).await? {
+            self.move_path_in_user_namespace(&previous, &data).await?;
+        }
         self.remove_paths_in_user_namespace([staging.clone(), previous.clone()])
             .await?;
         fs::create_dir_all(&staging).await?;
@@ -301,18 +307,30 @@ impl AgentExecutor {
         )
         .await?;
         let restored_data = staging.join(DATA_DIRECTORY_NAME);
-        if !restored_data.is_dir() {
+        let restored_metadata = fs::metadata(&restored_data).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ExecutorError::RestoreMissingDataDirectory(restored_data.clone())
+            } else {
+                ExecutorError::Io(error)
+            }
+        })?;
+        if !restored_metadata.is_dir() {
             return Err(ExecutorError::RestoreMissingDataDirectory(restored_data));
         }
-        let data = self.data_directory();
-        if data.exists() {
-            fs::rename(&data, &previous).await?;
+
+        if path_exists(&data).await? {
+            self.move_path_in_user_namespace(&data, &previous).await?;
         }
-        if let Err(error) = fs::rename(&restored_data, &data).await {
-            if previous.exists() && !data.exists() {
-                let _ = fs::rename(&previous, &data).await;
+        if let Err(error) = self
+            .move_path_in_user_namespace(&restored_data, &data)
+            .await
+        {
+            if path_exists(&previous).await.unwrap_or(false)
+                && !path_exists(&data).await.unwrap_or(true)
+            {
+                let _ = self.move_path_in_user_namespace(&previous, &data).await;
             }
-            return Err(error.into());
+            return Err(error);
         }
         self.remove_paths_in_user_namespace([previous, staging])
             .await?;
@@ -492,6 +510,22 @@ impl AgentExecutor {
         Ok(())
     }
 
+    async fn move_path_in_user_namespace(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), ExecutorError> {
+        let mut command = Command::new(&self.config.podman_binary);
+        command
+            .arg("unshare")
+            .arg("mv")
+            .arg("--")
+            .arg(source)
+            .arg(destination);
+        self.run_command(command, "podman unshare move").await?;
+        Ok(())
+    }
+
     async fn run_command(
         &self,
         command: Command,
@@ -647,6 +681,14 @@ fn path_to_string(path: &Path) -> Result<String, ExecutorError> {
         .ok_or_else(|| ExecutorError::NonUtf8Path(path.to_path_buf()))
 }
 
+async fn path_exists(path: &Path) -> Result<bool, ExecutorError> {
+    match fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
     fs::create_dir_all(path).await?;
     fs::set_permissions(
@@ -694,7 +736,7 @@ fn command_failure(description: &'static str, output: &Output) -> ExecutorError 
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
-    #[error("node operation I/O failed")]
+    #[error("node operation I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("node state serialization failed")]
     Serialization(#[from] serde_json::Error),
