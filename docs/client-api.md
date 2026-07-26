@@ -11,6 +11,10 @@ The client API uses JSON-RPC 2.0 over a Unix stream socket. JSON-RPC itself does
 - Notifications produce no response
 - Responses are also one JSON value per line
 
+## Timestamp representation
+
+All API fields ending in `_at_ms` are signed 64-bit Unix timestamps in milliseconds. They represent wall-clock event time. Durations and timeouts are configuration values expressed in seconds and are not timestamps.
+
 ## Methods
 
 ### `system.ping`
@@ -32,3 +36,21 @@ Returns all servers, ordered by name and UUID.
 ### `server.set_desired_state`
 
 Sets `running` or `stopped`. An optional `expected_generation` provides optimistic concurrency control. A successful state change increments `generation`; setting the same value is idempotent and does not increment it.
+
+The method records desired state and returns without waiting for materialization. The reconciler creates or terminates `ServerInstance` records asynchronously.
+
+### `server_instance.get`
+
+Returns one reconciler-owned `ServerInstance` by UUID. Clients cannot create or mutate instances directly.
+
+### `server_instance.list`
+
+Lists the complete instance history for one `server_id`, newest first. At most one returned instance can have `terminated_at_ms = null`.
+
+A `ServerInstance` contains:
+
+- the source `server_generation`
+- a resolved copy of the source `ServerSpec`
+- a monotonically increasing `fencing_token` scoped to the server
+- independent stop-request and terminal facts
+- creation and update timestamps

@@ -20,13 +20,18 @@
 
 - durable `ServerInstance` records
 - database-enforced maximum of one active instance per `Server`
-- resolved copy of the source `Server` generation
+- resolved copy of the source `Server` generation and specification
 - stop intent and terminal result represented as independent facts
 - fencing token for writable data ownership
+- read-only ServerInstance client API
+- cooperative `SIGINT` and `SIGTERM` shutdown
+- supervised core tasks and bounded shutdown waiting
+- system-wide Unix-millisecond timestamp convention
 
 ## Milestone 3: ComputeInstance provider
 
 - provider-neutral compute contract
+- fake provider for deterministic reconciliation tests
 - Akamai Cloud implementation
 - durable create, inspect, and delete operations
 - idempotency and recovery after uncertain provider responses
