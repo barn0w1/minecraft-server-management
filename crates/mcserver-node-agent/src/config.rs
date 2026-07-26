@@ -45,9 +45,7 @@ impl Config {
                 "MCSERVER_NODE_AGENT_CONNECTION_TOKEN",
             ));
         }
-        let state_directory = PathBuf::from(required(
-            "MCSERVER_NODE_AGENT_STATE_DIRECTORY",
-        )?);
+        let state_directory = PathBuf::from(required("MCSERVER_NODE_AGENT_STATE_DIRECTORY")?);
         let podman_binary = env::var_os("MCSERVER_NODE_AGENT_PODMAN_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
@@ -104,11 +102,13 @@ fn required(name: &'static str) -> Result<String, ConfigError> {
 
 fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     let value = match env::var(name) {
-        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
-            name,
-            value,
-            source,
-        })?,
+        Ok(value) => value
+            .parse()
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };
@@ -120,11 +120,13 @@ fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, Con
 
 fn parse_positive_duration(name: &'static str, default: u64) -> Result<Duration, ConfigError> {
     let seconds = match env::var(name) {
-        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
-            name,
-            value,
-            source,
-        })?,
+        Ok(value) => value
+            .parse()
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };

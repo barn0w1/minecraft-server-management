@@ -308,9 +308,7 @@ fn protocol_server_instance(instance: ServerInstance) -> ServerInstanceResource 
         source_snapshot_id: instance.source_snapshot_id,
         data_prepared_at_ms: instance.data_prepared_at.map(|value| value.as_millis()),
         process_running: instance.process_running,
-        process_observed_at_ms: instance
-            .process_observed_at
-            .map(|value| value.as_millis()),
+        process_observed_at_ms: instance.process_observed_at.map(|value| value.as_millis()),
         result_snapshot_id: instance.result_snapshot_id,
         last_error: instance.last_error,
         stop_requested_at_ms: instance.stop_requested_at.map(|value| value.as_millis()),

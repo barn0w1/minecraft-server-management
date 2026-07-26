@@ -128,7 +128,10 @@ async fn handle_connection(
             &mut writer,
             &Response::error(
                 Value::Null,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+                ErrorObject::new(
+                    json_rpc::error_code::INVALID_REQUEST,
+                    "Invalid registration",
+                ),
             ),
         )
         .await?;
@@ -146,7 +149,10 @@ async fn handle_connection(
             &mut writer,
             &Response::error(
                 response_id,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+                ErrorObject::new(
+                    json_rpc::error_code::INVALID_REQUEST,
+                    "Invalid registration",
+                ),
             ),
         )
         .await?;
@@ -162,8 +168,11 @@ async fn handle_connection(
                 &mut writer,
                 &Response::error(
                     response_id,
-                    ErrorObject::new(json_rpc::error_code::INVALID_PARAMS, "Invalid registration params")
-                        .with_data(json!({ "detail": error.to_string() })),
+                    ErrorObject::new(
+                        json_rpc::error_code::INVALID_PARAMS,
+                        "Invalid registration params",
+                    )
+                    .with_data(json!({ "detail": error.to_string() })),
                 ),
             )
             .await?;

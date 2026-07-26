@@ -6,9 +6,7 @@ use crate::domain::{
 
 use super::{
     RepositoryError,
-    server_repository::{
-        decode_timestamp, decode_uuid, i64_to_positive_u64,
-    },
+    server_repository::{decode_timestamp, decode_uuid, i64_to_positive_u64},
 };
 
 const MAX_ERROR_CHARS: usize = 8192;
@@ -343,10 +341,8 @@ impl ServerInstanceRepository {
 }
 
 fn decode_instance(row: &SqliteRow) -> Result<ServerInstance, RepositoryError> {
-    let id = decode_uuid(row.try_get::<String, _>("id")?)
-        .map(ServerInstanceId::from_uuid)?;
-    let server_id = decode_uuid(row.try_get::<String, _>("server_id")?)
-        .map(ServerId::from_uuid)?;
+    let id = decode_uuid(row.try_get::<String, _>("id")?).map(ServerInstanceId::from_uuid)?;
+    let server_id = decode_uuid(row.try_get::<String, _>("server_id")?).map(ServerId::from_uuid)?;
     let server_generation = i64_to_positive_u64(row.try_get("server_generation")?)?;
     let resolved_spec =
         serde_json::from_str::<ServerSpec>(&row.try_get::<String, _>("resolved_spec_json")?)?;
@@ -395,8 +391,6 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
     value.chars().take(maximum).collect()
 }
 
-fn optional_timestamp(
-    value: Option<i64>,
-) -> Result<Option<UnixTimestampMillis>, RepositoryError> {
+fn optional_timestamp(value: Option<i64>) -> Result<Option<UnixTimestampMillis>, RepositoryError> {
     value.map(decode_timestamp).transpose()
 }

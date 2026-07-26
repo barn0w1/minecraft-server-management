@@ -174,9 +174,7 @@ impl ServerSpec {
             return Err(ValidationError::ZeroValue("process.host_port"));
         }
         if self.process.stop_timeout_seconds == 0 {
-            return Err(ValidationError::ZeroValue(
-                "process.stop_timeout_seconds",
-            ));
+            return Err(ValidationError::ZeroValue("process.stop_timeout_seconds"));
         }
         if !self.process.accept_eula {
             return Err(ValidationError::EulaNotAccepted);
@@ -189,11 +187,7 @@ impl ServerSpec {
         }
         for (key, value) in &self.process.environment {
             require_non_blank("process.environment key", key)?;
-            require_maximum_length(
-                "process.environment key",
-                key,
-                MAX_ENVIRONMENT_KEY_CHARS,
-            )?;
+            require_maximum_length("process.environment key", key, MAX_ENVIRONMENT_KEY_CHARS)?;
             require_maximum_length(
                 "process.environment value",
                 value,
@@ -265,11 +259,7 @@ impl Server {
         }
         if let Some(snapshot_id) = current_snapshot_id.as_deref() {
             require_non_blank("current_snapshot_id", snapshot_id)?;
-            require_maximum_length(
-                "current_snapshot_id",
-                snapshot_id,
-                MAX_SNAPSHOT_ID_CHARS,
-            )?;
+            require_maximum_length("current_snapshot_id", snapshot_id, MAX_SNAPSHOT_ID_CHARS)?;
             reject_nul("current_snapshot_id", snapshot_id)?;
         }
         spec.validate()?;
@@ -394,7 +384,12 @@ mod tests {
     #[test]
     fn new_server_starts_stopped_at_generation_one() -> Result<(), Box<dyn std::error::Error>> {
         let now = UnixTimestampMillis::from_millis(1_000)?;
-        let server = Server::new(ServerId::new(), ServerName::new("community")?, valid_spec(), now)?;
+        let server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            now,
+        )?;
 
         assert_eq!(server.generation, 1);
         assert_eq!(server.desired_state, DesiredState::Stopped);
@@ -404,7 +399,12 @@ mod tests {
     #[test]
     fn setting_same_desired_state_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
         let now = UnixTimestampMillis::from_millis(1_000)?;
-        let mut server = Server::new(ServerId::new(), ServerName::new("community")?, valid_spec(), now)?;
+        let mut server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            now,
+        )?;
 
         assert!(!server.set_desired_state(DesiredState::Stopped, now)?);
         assert_eq!(server.generation, 1);
@@ -442,6 +442,9 @@ mod tests {
         let mut spec = valid_spec();
         spec.process.accept_eula = false;
 
-        assert!(matches!(spec.validate(), Err(ValidationError::EulaNotAccepted)));
+        assert!(matches!(
+            spec.validate(),
+            Err(ValidationError::EulaNotAccepted)
+        ));
     }
 }

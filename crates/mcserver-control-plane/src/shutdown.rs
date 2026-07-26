@@ -6,7 +6,10 @@ use std::{
     },
 };
 
-use tokio::{signal::unix::{Signal, SignalKind, signal}, sync::Notify};
+use tokio::{
+    signal::unix::{Signal, SignalKind, signal},
+    sync::Notify,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownSignal {
@@ -44,7 +47,6 @@ impl ShutdownSignals {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct CancellationToken {

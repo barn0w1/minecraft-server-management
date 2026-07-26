@@ -115,13 +115,9 @@ impl ComputeInstance {
         if terminated_at.is_some() != terminal_result.is_some() {
             return Err(ComputeInstanceValidationError::IncompleteTerminalState);
         }
-        for timestamp in [
-            agent_connected_at,
-            shutdown_requested_at,
-            terminated_at,
-        ]
-        .into_iter()
-        .flatten()
+        for timestamp in [agent_connected_at, shutdown_requested_at, terminated_at]
+            .into_iter()
+            .flatten()
         {
             if timestamp < created_at || timestamp > updated_at {
                 return Err(ComputeInstanceValidationError::InvalidTimestampOrder);

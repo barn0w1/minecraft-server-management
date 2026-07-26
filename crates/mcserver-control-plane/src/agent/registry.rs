@@ -33,10 +33,10 @@ impl AgentRegistry {
         session_id: Uuid,
         sender: mpsc::Sender<AgentCommand>,
     ) {
-        self.sessions.write().await.insert(
-            compute_instance_id,
-            AgentHandle { session_id, sender },
-        );
+        self.sessions
+            .write()
+            .await
+            .insert(compute_instance_id, AgentHandle { session_id, sender });
     }
 
     pub(super) async fn unregister(
@@ -54,7 +54,10 @@ impl AgentRegistry {
     }
 
     pub async fn is_connected(&self, compute_instance_id: ComputeInstanceId) -> bool {
-        self.sessions.read().await.contains_key(&compute_instance_id)
+        self.sessions
+            .read()
+            .await
+            .contains_key(&compute_instance_id)
     }
 
     pub async fn call<P, R>(

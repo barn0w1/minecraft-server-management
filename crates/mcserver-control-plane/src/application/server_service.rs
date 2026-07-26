@@ -2,8 +2,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, DesiredState, Server, ServerId, ServerName, ServerSpec, SystemClock,
-        ValidationError,
+        Clock, DesiredState, Server, ServerId, ServerName, ServerSpec, SystemClock, ValidationError,
     },
     infrastructure::{RepositoryError, ServerRepository},
     reconciliation::ReconcileScheduler,

@@ -73,22 +73,19 @@ impl LocalComputeManager {
         instance: &ServerInstance,
         now: UnixTimestampMillis,
     ) -> Result<(ComputeInstance, bool), LocalComputeError> {
-        let (compute, mut changed) = match self
-            .repository
-            .get_active_for_instance(instance.id)
-            .await?
-        {
-            Some(compute) => (compute, false),
-            None => {
-                let token = Uuid::new_v4().to_string();
-                let compute = self
-                    .repository
-                    .create_for_instance(instance.id, &token, now)
-                    .await?
-                    .ok_or(LocalComputeError::CreateConflict)?;
-                (compute, true)
-            }
-        };
+        let (compute, mut changed) =
+            match self.repository.get_active_for_instance(instance.id).await? {
+                Some(compute) => (compute, false),
+                None => {
+                    let token = Uuid::new_v4().to_string();
+                    let compute = self
+                        .repository
+                        .create_for_instance(instance.id, &token, now)
+                        .await?
+                        .ok_or(LocalComputeError::CreateConflict)?;
+                    (compute, true)
+                }
+            };
 
         if !self.process_is_running(&compute).await? {
             let (process_id, mut child) = self.spawn_agent(&compute).await?;
@@ -121,10 +118,7 @@ impl LocalComputeManager {
         Ok((compute, changed))
     }
 
-    pub async fn delete(
-        &self,
-        compute: &ComputeInstance,
-    ) -> Result<bool, LocalComputeError> {
+    pub async fn delete(&self, compute: &ComputeInstance) -> Result<bool, LocalComputeError> {
         let shutdown_requested_at = self.clock.now()?;
         self.repository
             .request_shutdown(compute.id, shutdown_requested_at)
@@ -151,12 +145,8 @@ impl LocalComputeManager {
                 wait_for_tracked_process_exit(child, self.process_stop_timeout).await?;
             }
             (None, Some(process_id)) => {
-                wait_for_untracked_process_exit(
-                    process_id,
-                    compute.id,
-                    self.process_stop_timeout,
-                )
-                .await?;
+                wait_for_untracked_process_exit(process_id, compute.id, self.process_stop_timeout)
+                    .await?;
             }
             (None, None) => {}
         }
@@ -206,11 +196,8 @@ impl LocalComputeManager {
     ) -> Result<(u32, Child), LocalComputeError> {
         let state_directory = self.state_directory(compute.id);
         tokio::fs::create_dir_all(&state_directory).await?;
-        tokio::fs::set_permissions(
-            &state_directory,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .await?;
+        tokio::fs::set_permissions(&state_directory, std::fs::Permissions::from_mode(0o700))
+            .await?;
 
         let mut command = Command::new(&self.node_agent_binary);
         command
@@ -226,17 +213,16 @@ impl LocalComputeManager {
                 "MCSERVER_NODE_AGENT_CONNECTION_TOKEN",
                 &compute.connection_token,
             )
-            .env(
-                "MCSERVER_NODE_AGENT_STATE_DIRECTORY",
-                &state_directory,
-            )
+            .env("MCSERVER_NODE_AGENT_STATE_DIRECTORY", &state_directory)
             .env(
                 "MCSERVER_NODE_AGENT_MAX_FRAME_BYTES",
                 self.max_frame_bytes.to_string(),
             )
             .env(
                 "MCSERVER_NODE_AGENT_COMMAND_TIMEOUT_SECONDS",
-                node_operation_timeout(self.command_timeout).as_secs().to_string(),
+                node_operation_timeout(self.command_timeout)
+                    .as_secs()
+                    .to_string(),
             )
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())

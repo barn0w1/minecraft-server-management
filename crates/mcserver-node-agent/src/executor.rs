@@ -6,8 +6,7 @@ use std::{
 
 use mcserver_protocol::node_agent::{
     AgentInspectResult, ChangedResult, CleanupInstanceParams, InstanceIdentity, ProcessSpec,
-    RestoreDataParams, SnapshotDataParams, SnapshotDataResult, StartServerParams,
-    StopServerParams,
+    RestoreDataParams, SnapshotDataParams, SnapshotDataResult, StartServerParams, StopServerParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,7 +47,10 @@ impl AgentExecutor {
         }
         let process_running = self.container_running(identity.server_instance_id).await?;
         Ok(AgentInspectResult {
-            data_prepared: state.instance.as_ref().is_some_and(|value| value.data_prepared),
+            data_prepared: state
+                .instance
+                .as_ref()
+                .is_some_and(|value| value.data_prepared),
             process_running,
             last_snapshot_id: state.instance.and_then(|value| value.last_snapshot_id),
         })
@@ -77,7 +79,8 @@ impl AgentExecutor {
         ensure_private_directory(&self.config.state_directory).await?;
         match params.source_snapshot_id.as_deref() {
             Some(snapshot_id) => {
-                self.restore_snapshot(&params.repository, snapshot_id).await?;
+                self.restore_snapshot(&params.repository, snapshot_id)
+                    .await?;
             }
             None => {
                 remove_directory_if_exists(&self.data_directory()).await?;
@@ -108,11 +111,15 @@ impl AgentExecutor {
         if !instance.data_prepared {
             return Err(ExecutorError::DataNotPrepared);
         }
-        if self.container_running(params.instance.server_instance_id).await? {
+        if self
+            .container_running(params.instance.server_instance_id)
+            .await?
+        {
             return Ok(ChangedResult { changed: false });
         }
 
-        self.remove_container(params.instance.server_instance_id).await?;
+        self.remove_container(params.instance.server_instance_id)
+            .await?;
         self.create_container(params.instance.server_instance_id, &params.process)
             .await?;
         self.run_podman(
@@ -129,9 +136,15 @@ impl AgentExecutor {
         params: StopServerParams,
     ) -> Result<ChangedResult, ExecutorError> {
         let state = self.load_state().await?;
-        let instance = state.instance.as_ref().ok_or(ExecutorError::UnknownInstance)?;
+        let instance = state
+            .instance
+            .as_ref()
+            .ok_or(ExecutorError::UnknownInstance)?;
         validate_identity(instance, params.instance)?;
-        if !self.container_running(params.instance.server_instance_id).await? {
+        if !self
+            .container_running(params.instance.server_instance_id)
+            .await?
+        {
             return Ok(ChangedResult { changed: false });
         }
 
@@ -158,16 +171,16 @@ impl AgentExecutor {
                 return Err(ExecutorError::ImmutableInstanceConfigurationChanged);
             }
         }
-        if self.container_running(params.instance.server_instance_id).await? {
+        if self
+            .container_running(params.instance.server_instance_id)
+            .await?
+        {
             return Err(ExecutorError::ProcessStillRunning);
         }
         self.ensure_restic_repository(&params.repository).await?;
 
         let server_tag = format!("mcserver-server:{}", params.server_id);
-        let instance_tag = format!(
-            "mcserver-instance:{}",
-            params.instance.server_instance_id
-        );
+        let instance_tag = format!("mcserver-instance:{}", params.instance.server_instance_id);
         let output = self
             .run_restic(
                 &params.repository,
@@ -204,8 +217,11 @@ impl AgentExecutor {
         if let Some(instance) = state.instance.as_ref() {
             validate_identity(instance, params.instance)?;
         }
-        let existed = self.container_exists(params.instance.server_instance_id).await?;
-        self.remove_container(params.instance.server_instance_id).await?;
+        let existed = self
+            .container_exists(params.instance.server_instance_id)
+            .await?;
+        self.remove_container(params.instance.server_instance_id)
+            .await?;
         Ok(ChangedResult { changed: existed })
     }
 
@@ -214,15 +230,28 @@ impl AgentExecutor {
         repository: &str,
         snapshot_id: &str,
     ) -> Result<(), ExecutorError> {
-        let staging = self.config.state_directory.join(RESTORE_STAGING_DIRECTORY_NAME);
-        let previous = self.config.state_directory.join(PREVIOUS_DATA_DIRECTORY_NAME);
+        let staging = self
+            .config
+            .state_directory
+            .join(RESTORE_STAGING_DIRECTORY_NAME);
+        let previous = self
+            .config
+            .state_directory
+            .join(PREVIOUS_DATA_DIRECTORY_NAME);
         remove_directory_if_exists(&staging).await?;
         remove_directory_if_exists(&previous).await?;
         fs::create_dir_all(&staging).await?;
         let staging_arg = path_to_string(&staging)?;
         self.run_restic(
             repository,
-            ["restore", snapshot_id, "--target", &staging_arg, "--json", "--quiet"],
+            [
+                "restore",
+                snapshot_id,
+                "--target",
+                &staging_arg,
+                "--json",
+                "--quiet",
+            ],
             None,
         )
         .await?;
@@ -303,7 +332,16 @@ impl AgentExecutor {
         }
         let name = container_name(server_instance_id);
         let output = self
-            .run_podman(["container", "inspect", "--format", "{{.State.Running}}", &name], None)
+            .run_podman(
+                [
+                    "container",
+                    "inspect",
+                    "--format",
+                    "{{.State.Running}}",
+                    &name,
+                ],
+                None,
+            )
             .await?;
         let value = String::from_utf8(output.stdout)?;
         match value.trim() {
@@ -400,9 +438,7 @@ impl AgentExecutor {
         command: Command,
         description: &'static str,
     ) -> Result<Output, ExecutorError> {
-        let output = self
-            .run_command_allow_failure(command, description)
-            .await?;
+        let output = self.run_command_allow_failure(command, description).await?;
         if output.status.success() {
             Ok(output)
         } else {
@@ -443,7 +479,10 @@ impl AgentExecutor {
     async fn store_state(&self, state: &AgentState) -> Result<(), ExecutorError> {
         ensure_private_directory(&self.config.state_directory).await?;
         let path = self.state_path();
-        let temporary = self.config.state_directory.join(format!("{STATE_FILE_NAME}.tmp"));
+        let temporary = self
+            .config
+            .state_directory
+            .join(format!("{STATE_FILE_NAME}.tmp"));
         let encoded = serde_json::to_vec_pretty(state)?;
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -513,7 +552,10 @@ fn ensure_instance_state(
             last_snapshot_id: None,
         });
     }
-    let instance = state.instance.as_mut().ok_or(ExecutorError::UnknownInstance)?;
+    let instance = state
+        .instance
+        .as_mut()
+        .ok_or(ExecutorError::UnknownInstance)?;
     validate_identity(instance, identity)?;
     if instance.server_id != server_id
         || instance.repository != repository
@@ -548,7 +590,11 @@ fn path_to_string(path: &Path) -> Result<String, ExecutorError> {
 
 async fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
     fs::create_dir_all(path).await?;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).await
+    fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+    )
+    .await
 }
 
 async fn remove_directory_if_exists(path: &Path) -> Result<(), std::io::Error> {

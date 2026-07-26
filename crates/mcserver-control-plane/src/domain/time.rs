@@ -29,8 +29,8 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Result<UnixTimestampMillis, TimestampError> {
         let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        let milliseconds = i64::try_from(elapsed.as_millis())
-            .map_err(|_| TimestampError::OutOfRange)?;
+        let milliseconds =
+            i64::try_from(elapsed.as_millis()).map_err(|_| TimestampError::OutOfRange)?;
         UnixTimestampMillis::from_millis(milliseconds)
     }
 }

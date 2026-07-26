@@ -4,8 +4,8 @@ use mcserver_protocol::{
     json_rpc::{self, ErrorObject, Request, Response},
     node_agent::{
         self, AgentInspectParams, CleanupInstanceParams, RegisterParams, RegisterResult,
-        RestoreDataParams, ShutdownResult, SnapshotDataParams, StartServerParams,
-        StopServerParams, method,
+        RestoreDataParams, ShutdownResult, SnapshotDataParams, StartServerParams, StopServerParams,
+        method,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -141,10 +141,7 @@ async fn dispatch(
     let method_name = request.method;
     let shutdown_requested = method_name == method::NODE_SHUTDOWN;
     match dispatch_method(executor, &method_name, request.params).await {
-        Ok(value) => (
-            Response::success(response_id, value),
-            shutdown_requested,
-        ),
+        Ok(value) => (Response::success(response_id, value), shutdown_requested),
         Err(error) => (
             Response::error(response_id, error.into_error_object()),
             false,
@@ -194,8 +191,7 @@ fn parse_params<T>(value: Value) -> Result<T, DispatchError>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(value)
-        .map_err(|error| DispatchError::InvalidParams(error.to_string()))
+    serde_json::from_value(value).map_err(|error| DispatchError::InvalidParams(error.to_string()))
 }
 
 fn require_no_params(params: &Value) -> Result<(), DispatchError> {

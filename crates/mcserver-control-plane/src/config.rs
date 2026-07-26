@@ -36,13 +36,10 @@ impl Config {
         let socket_path = env::var_os("MCSERVER_CONTROL_PLANE_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
-        let database_url = optional_string(
-            "MCSERVER_CONTROL_PLANE_DATABASE_URL",
-            DEFAULT_DATABASE_URL,
-        )?;
-        let socket_mode = parse_socket_mode(optional_string_value(
-            "MCSERVER_CONTROL_PLANE_SOCKET_MODE",
-        )?)?;
+        let database_url =
+            optional_string("MCSERVER_CONTROL_PLANE_DATABASE_URL", DEFAULT_DATABASE_URL)?;
+        let socket_mode =
+            parse_socket_mode(optional_string_value("MCSERVER_CONTROL_PLANE_SOCKET_MODE")?)?;
         let max_frame_bytes = parse_positive_usize(
             "MCSERVER_CONTROL_PLANE_MAX_FRAME_BYTES",
             DEFAULT_MAX_FRAME_BYTES,
@@ -63,10 +60,12 @@ impl Config {
             "MCSERVER_CONTROL_PLANE_AGENT_LISTEN_ADDRESS",
             DEFAULT_AGENT_LISTEN_ADDRESS,
         )?
-            .parse()
-            .map_err(ConfigError::InvalidSocketAddress)?;
+        .parse()
+        .map_err(ConfigError::InvalidSocketAddress)?;
         if !agent_listen_address.ip().is_loopback() {
-            return Err(ConfigError::AgentAddressMustBeLoopback(agent_listen_address));
+            return Err(ConfigError::AgentAddressMustBeLoopback(
+                agent_listen_address,
+            ));
         }
         if agent_listen_address.port() == 0 {
             return Err(ConfigError::ZeroAgentPort);
@@ -103,7 +102,6 @@ impl Config {
     }
 }
 
-
 fn optional_string(name: &'static str, default: &str) -> Result<String, ConfigError> {
     match optional_string_value(name)? {
         Some(value) => Ok(value),
@@ -133,11 +131,13 @@ fn parse_socket_mode(value: Option<String>) -> Result<u32, ConfigError> {
 
 fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     let value = match env::var(name) {
-        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
-            name,
-            value,
-            source,
-        })?,
+        Ok(value) => value
+            .parse()
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };
@@ -149,11 +149,13 @@ fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, Con
 
 fn parse_positive_duration(name: &'static str, default: u64) -> Result<Duration, ConfigError> {
     let seconds = match env::var(name) {
-        Ok(value) => value.parse().map_err(|source| ConfigError::InvalidInteger {
-            name,
-            value,
-            source,
-        })?,
+        Ok(value) => value
+            .parse()
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };

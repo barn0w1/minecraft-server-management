@@ -256,16 +256,13 @@ impl ComputeInstanceRepository {
 }
 
 fn decode_compute_instance(row: &SqliteRow) -> Result<ComputeInstance, RepositoryError> {
-    let id = decode_uuid(row.try_get::<String, _>("id")?)
-        .map(ComputeInstanceId::from_uuid)?;
+    let id = decode_uuid(row.try_get::<String, _>("id")?).map(ComputeInstanceId::from_uuid)?;
     let server_instance_id = decode_uuid(row.try_get::<String, _>("server_instance_id")?)
         .map(ServerInstanceId::from_uuid)?;
     let connection_token = row.try_get("connection_token")?;
     let process_id = row
         .try_get::<Option<i64>, _>("process_id")?
-        .map(|value| {
-            u32::try_from(value).map_err(|_| RepositoryError::IntegerOutOfRange)
-        })
+        .map(|value| u32::try_from(value).map_err(|_| RepositoryError::IntegerOutOfRange))
         .transpose()?;
     let agent_connected_at = optional_timestamp(row.try_get("agent_connected_at_ms")?)?;
     let shutdown_requested_at = optional_timestamp(row.try_get("shutdown_requested_at_ms")?)?;
@@ -302,8 +299,6 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
     value.chars().take(maximum).collect()
 }
 
-fn optional_timestamp(
-    value: Option<i64>,
-) -> Result<Option<UnixTimestampMillis>, RepositoryError> {
+fn optional_timestamp(value: Option<i64>) -> Result<Option<UnixTimestampMillis>, RepositoryError> {
     value.map(decode_timestamp).transpose()
 }

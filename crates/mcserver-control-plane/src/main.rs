@@ -5,8 +5,8 @@ use mcserver_control_plane::{
     application::{ServerInstanceService, ServerService},
     config::Config,
     infrastructure::{
-        ComputeInstanceRepository, LocalComputeManager, ServerInstanceRepository,
-        ServerRepository, SnapshotRepository, connect_database,
+        ComputeInstanceRepository, LocalComputeManager, ServerInstanceRepository, ServerRepository,
+        SnapshotRepository, connect_database,
     },
     interface::{ClientRpcHandler, UnixSocketError, UnixSocketServer},
     reconciliation::{ReconcileFatalError, ReconcileWorker},
@@ -140,17 +140,15 @@ fn unexpected_service_result(
     completed: Option<Result<ServiceExit, tokio::task::JoinError>>,
 ) -> ControlPlaneError {
     match completed {
-        Some(Ok(exit)) => exit.into_error(true).unwrap_or_else(|| {
-            ControlPlaneError::UnexpectedServiceExit(ServiceName::Unknown)
-        }),
+        Some(Ok(exit)) => exit
+            .into_error(true)
+            .unwrap_or_else(|| ControlPlaneError::UnexpectedServiceExit(ServiceName::Unknown)),
         Some(Err(error)) => ControlPlaneError::TaskJoin(error),
         None => ControlPlaneError::UnexpectedServiceExit(ServiceName::Unknown),
     }
 }
 
-async fn drain_services(
-    services: &mut JoinSet<ServiceExit>,
-) -> Result<(), ControlPlaneError> {
+async fn drain_services(services: &mut JoinSet<ServiceExit>) -> Result<(), ControlPlaneError> {
     let mut first_error = None;
     while let Some(completed) = services.join_next().await {
         let result = match completed {
@@ -190,9 +188,9 @@ impl ServiceExit {
             Self::ClientSocket(Err(error)) => Some(ControlPlaneError::Socket(error)),
             Self::AgentServer(Err(error)) => Some(ControlPlaneError::AgentServer(error)),
             Self::Reconciler(Err(error)) => Some(ControlPlaneError::Reconcile(error)),
-            Self::ClientSocket(Ok(()))
-            | Self::AgentServer(Ok(()))
-            | Self::Reconciler(Ok(())) => None,
+            Self::ClientSocket(Ok(())) | Self::AgentServer(Ok(())) | Self::Reconciler(Ok(())) => {
+                None
+            }
         }
     }
 }

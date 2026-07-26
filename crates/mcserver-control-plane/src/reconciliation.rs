@@ -1,9 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
 use mcserver_protocol::node_agent::{
-    AgentInspectParams, AgentInspectResult, ChangedResult, CleanupInstanceParams,
-    InstanceIdentity, ProcessSpec as AgentProcessSpec, RestoreDataParams, SnapshotDataParams,
-    SnapshotDataResult, StartServerParams, StopServerParams, method,
+    AgentInspectParams, AgentInspectResult, ChangedResult, CleanupInstanceParams, InstanceIdentity,
+    ProcessSpec as AgentProcessSpec, RestoreDataParams, SnapshotDataParams, SnapshotDataResult,
+    StartServerParams, StopServerParams, method,
 };
 use thiserror::Error;
 use tokio::{sync::mpsc, time::Instant};
@@ -12,14 +12,14 @@ use tracing::{debug, error, info, warn};
 use crate::{
     agent::{AgentCallError, AgentRegistry},
     domain::{
-        Clock, ComputeInstance, DesiredState, Server, ServerId, ServerInstance,
-        ServerInstanceId, SystemClock, TerminalResult, UnixTimestampMillis,
+        Clock, ComputeInstance, DesiredState, Server, ServerId, ServerInstance, ServerInstanceId,
+        SystemClock, TerminalResult, UnixTimestampMillis,
     },
-    shutdown::CancellationToken,
     infrastructure::{
         ComputeInstanceRepository, LocalComputeError, LocalComputeManager, RepositoryError,
         ServerInstanceRepository, ServerRepository, SnapshotRepository,
     },
+    shutdown::CancellationToken,
 };
 
 const RECONCILE_QUEUE_CAPACITY: usize = 256;
@@ -100,10 +100,7 @@ impl ReconcileWorker {
         )
     }
 
-    pub async fn run(
-        mut self,
-        cancellation: CancellationToken,
-    ) -> Result<(), ReconcileFatalError> {
+    pub async fn run(mut self, cancellation: CancellationToken) -> Result<(), ReconcileFatalError> {
         let mut resync = tokio::time::interval(self.resync_interval);
         resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut retry = tokio::time::interval(self.retry_interval);
@@ -191,14 +188,16 @@ impl ReconcileWorker {
     async fn resolve_request(&self, request: ReconcileRequest) -> Option<ServerId> {
         match request {
             ReconcileRequest::Server(server_id) => Some(server_id),
-            ReconcileRequest::ServerInstance(instance_id) => match self.instance_repository.get(instance_id).await {
-                Ok(Some(instance)) => Some(instance.server_id),
-                Ok(None) => None,
-                Err(error) => {
-                    warn!(%instance_id, %error, "failed to resolve instance reconcile notification");
-                    None
+            ReconcileRequest::ServerInstance(instance_id) => {
+                match self.instance_repository.get(instance_id).await {
+                    Ok(Some(instance)) => Some(instance.server_id),
+                    Ok(None) => None,
+                    Err(error) => {
+                        warn!(%instance_id, %error, "failed to resolve instance reconcile notification");
+                        None
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -306,7 +305,11 @@ impl ReconcileWorker {
 
         if server.desired_state == DesiredState::Stopped && instance.stop_requested_at.is_none() {
             let now = self.clock.now()?;
-            if self.instance_repository.request_stop(instance.id, now).await? {
+            if self
+                .instance_repository
+                .request_stop(instance.id, now)
+                .await?
+            {
                 info!(server_id = %server.id, server_instance_id = %instance.id, "server instance stop requested");
                 return Ok(StepOutcome::Changed);
             }
@@ -548,10 +551,14 @@ impl ReconcileWorker {
         now: UnixTimestampMillis,
     ) -> Result<bool, ReconcileError> {
         if inspect.data_prepared && instance.data_prepared_at.is_none() {
-            self.instance_repository.mark_data_prepared(instance.id, now).await?;
+            self.instance_repository
+                .mark_data_prepared(instance.id, now)
+                .await?;
             return Ok(true);
         }
-        if instance.process_observed_at.is_none() || instance.process_running != inspect.process_running {
+        if instance.process_observed_at.is_none()
+            || instance.process_running != inspect.process_running
+        {
             self.instance_repository
                 .observe_process(instance.id, inspect.process_running, now)
                 .await?;
