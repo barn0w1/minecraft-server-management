@@ -62,6 +62,19 @@ Additional environment variables are passed through after validation. The contai
 
 `server.stop` uses the configured Podman stop timeout. After snapshot publication, cleanup removes the container and then the local agent allocation.
 
+
+## Resetting local state
+
+Stop the control plane before resetting its database and local allocations. Container-created files can use subordinate UIDs, so do not rely on a host-side recursive removal and do not require `sudo`:
+
+```bash
+podman unshare rm -rf -- "$PWD/var/local-agents"
+rm -rf -- "$PWD/var"
+mkdir -p "$PWD/var"
+```
+
+The startup reaper handles scoped stale allocations during normal recovery. A full reset is only needed when intentionally discarding the local database and snapshots.
+
 ## Recovery behavior
 
 - Control-plane restart: node agents keep running, reconnect, and reconciliation resumes.
@@ -69,3 +82,29 @@ Additional environment variables are passed through after validation. The contai
 - Agent loss after writable `/data` exists and before snapshot publication: treated as data loss; the system does not fall back silently.
 - Lost snapshot response: agent state remembers the last snapshot ID, allowing publication after reconnect without another backup.
 - Old delayed snapshot: rejected by the ServerInstance fencing token.
+
+
+## Managed-resource ownership and startup recovery
+
+Every local Minecraft container has labels for managed ownership, local scope, Server, ServerInstance, and ComputeInstance. `MCSERVER_CONTROL_PLANE_LOCAL_SCOPE` separates independent control-plane installations sharing one rootless Podman account.
+
+At startup, the control plane compares scoped managed containers and node-agent state directories with active database resources. It removes only resources whose ServerInstance or ComputeInstance is no longer active. This recovers containers and subordinate-ID-owned data left by an interrupted test or by replacing the local database. Set `MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START=false` only for diagnosis.
+
+The E2E verifier attempts to bind the Podman publish port before creating a Server. An unavailable port is treated as an operator-visible conflict rather than entering an avoidable retry loop. Its failure cleanup is label-scoped and does not remove unrelated Podman containers.
+
+## Deterministic process-level E2E
+
+`scripts/deterministic_e2e.py` executes the real control-plane, SQLite repositories, reconciler, agent transport, and node-agent process. The executables under `scripts/fakes/` replace only Podman and restic.
+
+The verifier checks:
+
+- startup removal of a seeded orphan container, node-agent process, and state directory
+- recovery from one injected Podman `start` failure
+- recovery from one injected restic `backup` failure
+- empty-data first generation
+- snapshot publication
+- second-generation restore
+- fencing-token increase
+- final managed-container cleanup
+
+It does not open the Minecraft TCP port or write a real world, so it is suitable for frequent development runs. The real `local_e2e.py` remains the acceptance test for rootless Podman, SELinux, restic, the image, and actual Minecraft readiness.

@@ -102,6 +102,8 @@ They share the JSON-RPC envelope only. Their DTOs, methods, framing, trust bound
 
 The local agent listener binds only to a loopback address. Each ComputeInstance has a random connection token and a protocol version check. A reconnect replaces the old in-memory session for that ComputeInstance.
 
+The client API also has a reusable Unix-socket client and `mcserverctl`. `server.status` is a read-only projection combining the durable Server, its active instance and compute allocation, and current agent connectivity; it does not introduce another persisted phase or resource.
+
 ## Time model
 
 Persistent wall-clock timestamps use a single representation:
@@ -124,3 +126,5 @@ The control plane handles `SIGINT` and `SIGTERM` cooperatively:
 4. close SQLite and remove the Unix socket
 
 Control-plane shutdown does not intentionally stop active Minecraft containers or local agents. The agents reconnect after the control plane restarts, allowing reconciliation to continue from durable state.
+
+Local Podman containers carry managed, installation-scope, Server, ServerInstance, and ComputeInstance labels. On startup the control plane compares those labels, scoped node-agent processes, and local state directories with active database rows, then removes only scoped orphan resources. This cleanup is recovery from lost local bookkeeping, not a replacement for normal desired-state shutdown.

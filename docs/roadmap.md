@@ -1,62 +1,49 @@
 # Roadmap
 
-## Completed: foundation and local vertical slice
+## Completed: local vertical slice
 
-- Rust workspace, edition 2024, Rust 1.97.1
-- Unix-socket client JSON-RPC
-- durable Server desired state with optimistic generation checks
-- reconciler-owned ServerInstance with active uniqueness and fencing
-- graceful control-plane shutdown and task supervision
-- loopback node-agent JSON-RPC with reconnect and registration token
-- local-process ComputeInstance provider
-- opaque restic restore and snapshot
-- direct rootless Podman execution of `itzg/minecraft-server`
-- fenced transactional snapshot publication
-- two-generation local E2E verifier
+- durable Server desired state and optimistic generation checks
+- reconciler-owned ServerInstance and ComputeInstance with active uniqueness
+- fencing-token-protected restic snapshot publication
+- loopback node-agent registration, reconnect, and durable operation state
+- rootless Podman Minecraft lifecycle with subordinate-ID-safe data operations
+- real two-generation Fedora/Podman/restic/Minecraft E2E
 
-## Next: harden local operation
+## Completed: pre-cloud reliability checkpoint
 
-- run and fix `fmt`, `check`, `clippy`, and tests on the target Rust toolchain
-- execute the E2E verifier against real Podman/restic/Minecraft
-- add integration tests with fake Podman and restic executables
-- persist bounded operation attempts and improve per-Server retry backoff
-- expose read-only ComputeInstance and snapshot diagnostics if operationally needed
-- add a small `mcserverctl` client instead of relying on raw JSON
-- add structured metrics and an audit/event log
+- managed-resource labels and installation-local scope
+- startup orphan container, process, and state-directory reaping
+- TCP port preflight and label-scoped failed-test cleanup
+- deterministic fake Podman and restic command adapters
+- process-level two-generation E2E using the real daemons
+- injected transient Podman and restic failure recovery
+- reusable Unix-socket JSON-RPC client
+- `mcserverctl` operator commands
+- aggregate read-only `server.status`
 
-## Cloud node provider
+See [the checkpoint definition](pre-cloud-checkpoint.md).
 
-- provider-neutral compute adapter
-- Akamai Cloud instance create, inspect, and delete
-- deterministic provider labels for idempotency after uncertain API responses
-- cloud-init or image-based node-agent installation
-- short-lived enrollment credentials and rotation
-- orphan instance discovery and cleanup
-- API rate-limit handling and bounded backoff
+## Next checkpoint: remote Akamai vertical slice
 
-## Production node execution
+Implement this as one coherent capability rather than separately deployable insecure steps:
 
-- replace direct Podman lifecycle with systemd and Quadlet where appropriate
-- preserve the existing agent protocol and opaque data boundary
-- explicit filesystem ownership and SELinux policy
-- node boot recovery and service supervision
-- log streaming and bounded retention
+1. remote agent TLS server identity and one-time enrollment
+2. short-lived ComputeInstance-bound agent credentials and revocation
+3. provider-neutral compute boundary extracted from the proven local implementation
+4. Akamai Cloud create, inspect, and delete with deterministic provider labels
+5. recovery after create/delete responses are lost or time out
+6. cloud-init or image-based node-agent installation
+7. systemd/Quadlet Minecraft supervision on the ephemeral node
+8. R2-compatible restic repository credential delivery
+9. cloud orphan discovery, rate-limit handling, and bounded retry
+10. full remote start, restore, readiness, stop, snapshot, publish, and VM deletion E2E
 
-## Object storage and data operations
+## Following checkpoints
 
-- restic repository on an S3-compatible backend such as Cloudflare R2
-- credential delivery that does not place long-lived secrets in Server specs
-- retention policy and garbage collection
-- scheduled repository integrity checks
-- snapshot listing and deliberate rollback API
-- disaster-recovery documentation
+- audit/event history and metrics
+- snapshot listing, explicit rollback, retention, prune, and repository checks
+- Unix-socket authorization and remote authenticated client gateway
+- Discord bot built on the same client API
+- disaster-recovery and production operations documentation
 
-## Multi-client operation
-
-- Unix-socket authorization by owner/group
-- `mcserverctl`
-- Discord bot using the same client API
-- optional remote authenticated client gateway
-- audit identity and idempotency keys for mutating requests
-
-The roadmap should continue to prefer complete vertical capabilities over broad generic abstractions. New resources are introduced only when the existing model can no longer express an independent lifecycle safely.
+Continue to prefer complete vertical capabilities over generic frameworks. Add resources only for independent lifecycles, and extract provider traits when the second implementation supplies concrete requirements.

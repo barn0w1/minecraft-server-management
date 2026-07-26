@@ -68,6 +68,17 @@ Params: `server_id` UUID.
 
 No params. Returns Servers ordered by name and UUID.
 
+### `server.status`
+
+Params: `server_id` UUID. Returns an aggregate read-only view containing:
+
+- the durable Server
+- the active ServerInstance, when present
+- the active ComputeInstance, without its connection token
+- whether that ComputeInstance currently has a registered agent session
+
+This is a projection of existing resources, not another persisted lifecycle resource.
+
 ### `server.set_desired_state`
 
 Params:
@@ -97,3 +108,21 @@ Useful observed fields include:
 - `stop_requested_at_ms`
 - `terminated_at_ms`
 - `terminal_result`
+
+
+## Operator CLI
+
+`mcserverctl` uses the same Unix-socket JSON-RPC API:
+
+```text
+mcserverctl [--socket PATH] ping
+mcserverctl [--socket PATH] server list
+mcserverctl [--socket PATH] server get SERVER_ID
+mcserverctl [--socket PATH] server status SERVER_ID
+mcserverctl [--socket PATH] server instances SERVER_ID
+mcserverctl [--socket PATH] server start SERVER_ID
+mcserverctl [--socket PATH] server stop SERVER_ID
+mcserverctl [--socket PATH] server create --name NAME --repository PATH --accept-eula ...
+```
+
+Start and stop first read the current generation and send an optimistic desired-state update. Mutations still have the same JSON-RPC semantics as direct clients.

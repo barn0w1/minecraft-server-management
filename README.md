@@ -48,6 +48,8 @@ crates/
 - persistence: SQLite
 - local data snapshots: restic
 - local Minecraft execution: rootless Podman and `itzg/minecraft-server`
+- operator CLI: `mcserverctl`
+- fast integration verifier: real Rust daemons with deterministic fake Podman/restic
 
 ## Local prerequisites
 
@@ -74,8 +76,9 @@ This branch replaces the experimental migration history with a new initial schem
 ```bash
 cargo build --workspace
 
-rm -rf var
-mkdir -p var
+podman unshare rm -rf -- "$PWD/var/local-agents"
+rm -rf -- "$PWD/var"
+mkdir -p "$PWD/var"
 
 export RESTIC_PASSWORD='local-development-only'
 export MCSERVER_CONTROL_PLANE_SOCKET="$PWD/var/control-plane.sock"
@@ -112,13 +115,34 @@ python3 scripts/local_e2e.py \
   --skip-port-check
 ```
 
+The verifier refuses to start when the selected Podman publish port cannot be bound. On failure it first requests a normal stop and then force-removes only containers carrying this project's managed, local-scope, and Server labels.
+
+For routine development, use the deterministic process-level E2E. It starts the real control-plane and node-agent binaries, but substitutes small fake Podman and restic executables. It also seeds an orphan container, node-agent process, and state directory, then injects one transient Podman and restic failure:
+
+```bash
+cargo build --workspace
+python3 scripts/deterministic_e2e.py
+```
+
+Basic operation no longer requires hand-written JSON:
+
+```bash
+target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" ping
+target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" server list
+target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" server status SERVER_ID
+```
+
 ## Validation
+
+The same fast validation runs in `.github/workflows/ci.yml`. The workflow uses the pinned toolchain and does not require Podman or restic because its vertical-slice job uses the deterministic substitutes.
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 -m py_compile scripts/local_e2e.py
+python3 -m py_compile scripts/*.py scripts/fakes/*.py
+python3 scripts/deterministic_e2e.py
 ```
 
-See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), and [roadmap](docs/roadmap.md).
+See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), and [roadmap](docs/roadmap.md).

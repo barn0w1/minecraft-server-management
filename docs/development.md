@@ -71,7 +71,8 @@ Schema constraints must mirror domain invariants. Migration files are immutable 
 - use argument APIs, never shell interpolation
 - set `kill_on_drop(true)` for bounded command execution
 - capture stdout/stderr and include a bounded diagnostic on failure
-- use deterministic resource names and provider labels
+- use deterministic resource names and complete ownership labels
+- scope local runtime resources so cleanup never targets another control-plane installation
 - verify an untracked PID still belongs to the intended local agent before signaling it
 - treat timeout responses as uncertain and do not reuse a desynchronized RPC session
 
@@ -94,3 +95,15 @@ barn0w1 <yuito.kiuchi.dev@gmail.com>
 - Node-agent restic commands use `--retry-lock`; `MCSERVER_NODE_AGENT_RESTIC_RETRY_LOCK_SECONDS` defaults to 300 seconds.
 - Any operation that reads, writes, restores, or removes container-owned server data runs through `podman unshare`; host-side recursive filesystem operations must not assume subordinate-ID-owned paths are accessible.
 - Command timeout and repository-lock wait are durations, never persisted wall-clock timestamps.
+
+
+## Test layers
+
+Use the cheapest layer that proves the change:
+
+1. unit tests for domain rules, parsers, and retry calculations
+2. `scripts/deterministic_e2e.py` for daemon, transport, persistence, reconciliation, retry, and cleanup behavior
+3. `scripts/local_e2e.py --skip-port-check` for real Podman/restic infrastructure
+4. `scripts/local_e2e.py` for actual Minecraft readiness and two-generation data recovery
+
+Fake executables must model command-line contracts and persistent observations, not reimplement production business rules.
