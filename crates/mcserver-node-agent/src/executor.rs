@@ -217,12 +217,64 @@ impl AgentExecutor {
         if let Some(instance) = state.instance.as_ref() {
             validate_identity(instance, params.instance)?;
         }
-        let existed = self
+        let container_existed = self
             .container_exists(params.instance.server_instance_id)
             .await?;
         self.remove_container(params.instance.server_instance_id)
             .await?;
-        Ok(ChangedResult { changed: existed })
+
+        let storage_existed = self.instance_storage_exists().await?;
+        self.remove_instance_storage().await?;
+        Ok(ChangedResult {
+            changed: container_existed || storage_existed,
+        })
+    }
+
+    async fn instance_storage_exists(&self) -> Result<bool, ExecutorError> {
+        for path in [
+            self.data_directory(),
+            self.config
+                .state_directory
+                .join(RESTORE_STAGING_DIRECTORY_NAME),
+            self.config
+                .state_directory
+                .join(PREVIOUS_DATA_DIRECTORY_NAME),
+            self.state_path(),
+        ] {
+            match fs::metadata(path).await {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(false)
+    }
+
+    async fn remove_instance_storage(&self) -> Result<(), ExecutorError> {
+        let mut command = Command::new(&self.config.podman_binary);
+        command
+            .arg("unshare")
+            .arg("rm")
+            .arg("-rf")
+            .arg("--")
+            .arg(self.data_directory())
+            .arg(
+                self.config
+                    .state_directory
+                    .join(RESTORE_STAGING_DIRECTORY_NAME),
+            )
+            .arg(
+                self.config
+                    .state_directory
+                    .join(PREVIOUS_DATA_DIRECTORY_NAME),
+            );
+        self.run_command(command, "podman unshare cleanup").await?;
+
+        match fs::remove_file(self.state_path()).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn restore_snapshot(

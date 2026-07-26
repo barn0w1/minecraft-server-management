@@ -185,10 +185,14 @@ def wait_for_completed_instance(
     instance_id: str,
     deadline: float,
 ) -> dict[str, Any]:
+    last_error: str | None = None
+
     def inspect() -> dict[str, Any] | None:
+        nonlocal last_error
         for instance in list_instances(client, server_id):
             if instance["id"] != instance_id:
                 continue
+            last_error = instance.get("last_error")
             if instance["terminated_at_ms"] is None:
                 return None
             if instance["terminal_result"] != "completed":
@@ -198,7 +202,10 @@ def wait_for_completed_instance(
             return instance
         return None
 
-    return wait_until("a completed ServerInstance", deadline, inspect)
+    try:
+        return wait_until("a completed ServerInstance", deadline, inspect)
+    except TimeoutError as error:
+        raise TimeoutError(f"{error}; reconciler last_error={last_error!r}") from error
 
 
 def wait_for_tcp_port(host: str, port: int, deadline: float) -> None:

@@ -359,11 +359,11 @@ async fn send_signal(process_id: u32, signal: &str) -> Result<(), LocalComputeEr
 
 #[derive(Debug, Error)]
 pub enum LocalComputeError {
-    #[error("local compute persistence failed")]
+    #[error("local compute persistence failed: {0}")]
     Repository(#[from] RepositoryError),
-    #[error("local compute filesystem or process operation failed")]
+    #[error("local compute filesystem or process operation failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("local compute timestamp generation failed")]
+    #[error("local compute timestamp generation failed: {0}")]
     Timestamp(#[from] crate::domain::TimestampError),
     #[error("failed to spawn node-agent binary {binary}")]
     Spawn {

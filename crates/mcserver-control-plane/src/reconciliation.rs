@@ -223,7 +223,7 @@ impl ReconcileWorker {
                 let retry_delay = error_retry_delay(self.retry_interval, consecutive_failures);
                 warn!(
                     %server_id,
-                    %error,
+                    error = ?error,
                     ?retry_delay,
                     consecutive_failures,
                     "server reconciliation failed; retry scheduled"
@@ -616,13 +616,13 @@ enum ReconcileOutcome {
 
 #[derive(Debug, Error)]
 pub enum ReconcileError {
-    #[error("reconciliation persistence operation failed")]
+    #[error("reconciliation persistence operation failed: {0}")]
     Repository(#[from] RepositoryError),
-    #[error("reconciliation timestamp operation failed")]
+    #[error("reconciliation timestamp operation failed: {0}")]
     Timestamp(#[from] crate::domain::TimestampError),
-    #[error("local compute operation failed")]
+    #[error("local compute operation failed: {0}")]
     LocalCompute(#[from] LocalComputeError),
-    #[error("node-agent operation failed")]
+    #[error("node-agent operation failed: {0}")]
     Agent(#[from] AgentCallError),
     #[error("server reconciliation did not converge for {0}")]
     DidNotConverge(ServerId),

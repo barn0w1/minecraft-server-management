@@ -10,3 +10,6 @@ rustc-ice-*.txt
 .idea/
 .vscode/
 .DS_Store
+
+**/__pycache__/
+*.py[cod]

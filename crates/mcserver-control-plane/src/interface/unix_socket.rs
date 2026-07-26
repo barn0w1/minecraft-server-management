@@ -11,7 +11,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     task::JoinSet,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::shutdown::CancellationToken;
 
@@ -54,7 +54,7 @@ impl UnixSocketServer {
                 () = cancellation.cancelled() => break,
                 accepted = self.listener.accept() => {
                     let (stream, address) = accepted?;
-                    debug!(?address, "accepted client JSON-RPC connection");
+                    trace!(?address, "accepted client JSON-RPC connection");
                     let handler = self.handler.clone();
                     let max_frame_bytes = self.max_frame_bytes;
                     let connection_cancellation = cancellation.child_token();
