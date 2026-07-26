@@ -29,7 +29,7 @@ crates/
 └── mcserver-protocol/
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) and [`docs/roadmap.md`](docs/roadmap.md).
+See [`docs/architecture.md`](docs/architecture.md), [`docs/development.md`](docs/development.md), and [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Local development configuration
 

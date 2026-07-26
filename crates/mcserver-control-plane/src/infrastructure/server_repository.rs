@@ -109,8 +109,10 @@ fn decode_server(row: &SqliteRow) -> Result<Server, RepositoryError> {
         .map_err(|source| RepositoryError::CorruptData(source.to_string()))?;
     let name = ServerName::new(row.try_get::<String, _>("name")?)?;
     let generation = i64_to_generation(row.try_get("generation")?)?;
-    let desired_state = DesiredState::parse(row.try_get("desired_state")?)?;
-    let spec = serde_json::from_str::<ServerSpec>(row.try_get("spec_json")?)?;
+    let desired_state = row.try_get::<String, _>("desired_state")?;
+    let desired_state = DesiredState::parse(&desired_state)?;
+    let spec_json = row.try_get::<String, _>("spec_json")?;
+    let spec = serde_json::from_str::<ServerSpec>(&spec_json)?;
     let created_at_ms = row.try_get("created_at_ms")?;
     let updated_at_ms = row.try_get("updated_at_ms")?;
 

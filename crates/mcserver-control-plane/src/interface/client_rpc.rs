@@ -75,12 +75,10 @@ impl ClientRpcHandler {
         };
 
         if request.jsonrpc != json_rpc::VERSION || request.method.is_empty() {
-            return request.id.response_id().map(|id| {
-                response_value(Response::error(
-                    id,
-                    ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid Request"),
-                ))
-            });
+            return Some(response_value(Response::error(
+                request.id.response_id().unwrap_or(Value::Null),
+                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid Request"),
+            )));
         }
 
         if !matches!(request.params, Value::Null | Value::Array(_) | Value::Object(_)) {

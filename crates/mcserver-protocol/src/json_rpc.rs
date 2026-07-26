@@ -109,3 +109,29 @@ pub mod error_code {
     pub const CONFLICT: i64 = -32001;
     pub const NOT_FOUND: i64 = -32004;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_id_is_a_notification() -> Result<(), serde_json::Error> {
+        let request = serde_json::from_str::<Request>(
+            r#"{"jsonrpc":"2.0","method":"system.ping"}"#,
+        )?;
+
+        assert!(request.id.is_notification());
+        Ok(())
+    }
+
+    #[test]
+    fn null_id_is_still_present() -> Result<(), serde_json::Error> {
+        let request = serde_json::from_str::<Request>(
+            r#"{"jsonrpc":"2.0","method":"system.ping","id":null}"#,
+        )?;
+
+        assert!(!request.id.is_notification());
+        assert_eq!(request.id.response_id(), Some(Value::Null));
+        Ok(())
+    }
+}

@@ -7,7 +7,7 @@ use std::{
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::watch,
 };
@@ -82,38 +82,19 @@ async fn handle_connection(
 ) -> Result<(), UnixSocketError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut frame = String::new();
+    let mut frame = Vec::new();
 
     loop {
-        frame.clear();
-        let read = reader.read_line(&mut frame).await?;
+        let read = read_frame(&mut reader, &mut frame, max_frame_bytes).await?;
         if read == 0 {
             return Ok(());
         }
 
-        if frame.len() > max_frame_bytes {
-            write_json_line(
-                &mut writer,
-                &json!({
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": -32600,
-                        "message": "Request frame is too large"
-                    },
-                    "id": null
-                }),
-            )
-            .await?;
-            return Err(UnixSocketError::FrameTooLarge {
-                actual: frame.len(),
-                maximum: max_frame_bytes,
-            });
-        }
-
-        let input = frame.trim_end_matches(['\r', '\n']);
+        let input = trim_line_ending(&frame);
         if input.is_empty() {
             continue;
         }
+        let input = std::str::from_utf8(input)?;
 
         if let Some(response) = handler.handle_json(input).await {
             write_json_line(&mut writer, &response).await?;
@@ -121,9 +102,49 @@ async fn handle_connection(
     }
 }
 
+async fn read_frame<R>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+    maximum: usize,
+) -> Result<usize, UnixSocketError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    frame.clear();
+
+    loop {
+        let (consumed, terminated) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                return Ok(frame.len());
+            }
+
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let actual = frame.len().saturating_add(consumed);
+            if actual > maximum {
+                return Err(UnixSocketError::FrameTooLarge { actual, maximum });
+            }
+
+            frame.extend_from_slice(&available[..consumed]);
+            (consumed, newline.is_some())
+        };
+
+        reader.consume(consumed);
+        if terminated {
+            return Ok(frame.len());
+        }
+    }
+}
+
+fn trim_line_ending(frame: &[u8]) -> &[u8] {
+    let frame = frame.strip_suffix(b"\n").unwrap_or(frame);
+    frame.strip_suffix(b"\r").unwrap_or(frame)
+}
+
 async fn write_json_line<W>(writer: &mut W, value: &Value) -> Result<(), UnixSocketError>
 where
-    W: AsyncWriteExt + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let encoded = serde_json::to_vec(value)?;
     writer.write_all(&encoded).await?;
@@ -177,10 +198,12 @@ pub enum UnixSocketError {
     Io(#[from] io::Error),
     #[error("JSON serialization failed")]
     Serialization(#[from] serde_json::Error),
+    #[error("request frame is not valid UTF-8")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("Unix socket path has no parent: {path}")]
     MissingParent { path: PathBuf },
     #[error("Unix socket path is occupied by a non-socket file: {path}")]
     PathOccupied { path: PathBuf },
-    #[error("request frame is too large: {actual} bytes, maximum {maximum} bytes")]
+    #[error("request frame is too large: at least {actual} bytes, maximum {maximum} bytes")]
     FrameTooLarge { actual: usize, maximum: usize },
 }

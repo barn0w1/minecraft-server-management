@@ -56,15 +56,21 @@ impl Config {
 }
 
 fn parse_socket_mode(value: Option<String>) -> Result<u32, ConfigError> {
-    match value {
+    let mode = match value {
         Some(value) => u32::from_str_radix(value.trim_start_matches("0o"), 8).map_err(|source| {
             ConfigError::InvalidSocketMode {
                 value,
                 source,
             }
-        }),
-        None => Ok(DEFAULT_SOCKET_MODE),
+        })?,
+        None => DEFAULT_SOCKET_MODE,
+    };
+
+    if mode > 0o777 {
+        return Err(ConfigError::SocketModeOutOfRange(mode));
     }
+
+    Ok(mode)
 }
 
 fn parse_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
@@ -116,6 +122,8 @@ pub enum ConfigError {
         #[source]
         source: std::num::ParseIntError,
     },
+    #[error("socket mode must be between 0000 and 0777, got {0:o}")]
+    SocketModeOutOfRange(u32),
     #[error("{0} must be greater than zero")]
     ZeroValue(&'static str),
 }
