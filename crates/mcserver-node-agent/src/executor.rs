@@ -611,15 +611,13 @@ fn parse_backup_snapshot_id(output: &[u8]) -> Result<String, ExecutorError> {
             continue;
         }
         let value: Value = serde_json::from_slice(line)?;
-        if value.get("message_type").and_then(Value::as_str) == Some("summary") {
-            if let Some(snapshot_id) = value.get("snapshot_id").and_then(Value::as_str) {
-                if !snapshot_id.trim().is_empty()
-                    && snapshot_id.chars().count() <= MAX_SNAPSHOT_ID_CHARS
-                    && !snapshot_id.contains('\0')
-                {
-                    return Ok(snapshot_id.to_owned());
-                }
-            }
+        if value.get("message_type").and_then(Value::as_str) == Some("summary")
+            && let Some(snapshot_id) = value.get("snapshot_id").and_then(Value::as_str)
+            && !snapshot_id.trim().is_empty()
+            && snapshot_id.chars().count() <= MAX_SNAPSHOT_ID_CHARS
+            && !snapshot_id.contains('\0')
+        {
+            return Ok(snapshot_id.to_owned());
         }
     }
     Err(ExecutorError::MissingSnapshotId)
