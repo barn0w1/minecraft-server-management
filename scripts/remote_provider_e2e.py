@@ -97,6 +97,7 @@ class FakeAkamaiState:
                 "region": AKAMAI_REGION,
                 "type": "g6-nanode-1",
                 "image": AKAMAI_IMAGE,
+                "disk_encryption": "disabled",
                 "has_user_data": True,
             }
             self.orphan_ids.add(instance_id)
@@ -122,6 +123,7 @@ class FakeAkamaiState:
                 "region": request["region"],
                 "type": request["type"],
                 "image": request["image"],
+                "disk_encryption": request["disk_encryption"],
                 "has_user_data": True,
             }
             self.instances[instance_id] = value
@@ -331,7 +333,15 @@ class FakeAkamaiHandler(BaseHTTPRequestHandler):
                 {"Retry-After": "1"},
             )
             return
-        required = {"region", "type", "image", "label", "authorized_keys", "metadata"}
+        required = {
+            "region",
+            "type",
+            "image",
+            "label",
+            "authorized_keys",
+            "disk_encryption",
+            "metadata",
+        }
         missing = sorted(required - request.keys())
         if missing:
             self.send_json(
@@ -919,6 +929,10 @@ def main() -> int:
                         raise RuntimeError("Akamai create request did not request boot")
                     if request.get("firewall_id") != 123:
                         raise RuntimeError("Akamai create request lost firewall id")
+                    if request.get("disk_encryption") != "disabled":
+                        raise RuntimeError(
+                            "Akamai create request did not disable disk encryption"
+                        )
                     if "mcserver-managed" not in request.get("tags", []):
                         raise RuntimeError("Akamai create request has no ownership tag")
             with sqlite3.connect(database_path) as database:

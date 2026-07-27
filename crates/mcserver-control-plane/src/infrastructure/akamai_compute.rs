@@ -26,6 +26,13 @@ const MAX_API_ERROR_BODY_BYTES: usize = 64 * 1024;
 const CLOUD_INIT_CAPABILITY: &str = "cloud-init";
 const METADATA_CAPABILITY: &str = "Metadata";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DiskEncryption {
+    Enabled,
+    Disabled,
+}
+
 struct InstanceProvisioningRequest<'a> {
     label: &'a str,
     region: &'a str,
@@ -400,6 +407,7 @@ impl AkamaiComputeManager {
             authorized_keys: bootstrap.authorized_keys,
             tags: vec![MANAGED_TAG.to_owned(), self.scope_tag()],
             firewall_id: self.config.firewall_id,
+            disk_encryption: DiskEncryption::Disabled,
             metadata: MetadataRequest {
                 user_data: bootstrap.user_data_base64,
             },
@@ -856,6 +864,7 @@ struct CreateInstanceRequest {
     authorized_keys: Vec<String>,
     tags: Vec<String>,
     firewall_id: u64,
+    disk_encryption: DiskEncryption,
     metadata: MetadataRequest,
 }
 
@@ -872,6 +881,7 @@ struct ProviderInstance {
     #[serde(rename = "type")]
     instance_type: String,
     image: String,
+    disk_encryption: DiskEncryption,
     #[serde(default)]
     ipv4: Vec<String>,
     #[serde(default)]
@@ -940,6 +950,11 @@ impl ProviderInstance {
                     observed_image: self.image.clone(),
                 },
             )));
+        }
+        if self.disk_encryption != DiskEncryption::Disabled {
+            return Err(AkamaiComputeError::DiskEncryptionEnabled {
+                provider_instance_id: self.id,
+            });
         }
         Ok(())
     }
@@ -1043,6 +1058,10 @@ pub enum AkamaiComputeError {
     #[error(transparent)]
     ProviderConfigurationMismatch(Box<AkamaiProviderConfigurationMismatch>),
     #[error(
+        "Akamai instance {provider_instance_id} has disk encryption enabled; managed instances require disk_encryption=disabled"
+    )]
+    DiskEncryptionEnabled { provider_instance_id: u64 },
+    #[error(
         "Akamai instance type response identity mismatch: expected {expected}, observed {observed}"
     )]
     InstanceTypeIdentityMismatch { expected: String, observed: String },
@@ -1121,6 +1140,7 @@ mod tests {
             authorized_keys: vec!["ssh-ed25519 test".to_owned()],
             tags: vec!["mcserver-managed".to_owned()],
             firewall_id: 123,
+            disk_encryption: super::DiskEncryption::Disabled,
             metadata: MetadataRequest {
                 user_data: "dGVzdA==".to_owned(),
             },
@@ -1130,6 +1150,7 @@ mod tests {
         assert_eq!(value["type"], json!("g6-nanode-1"));
         assert!(value.get("instance_type").is_none());
         assert_eq!(value["firewall_id"], json!(123));
+        assert_eq!(value["disk_encryption"], json!("disabled"));
         assert_eq!(value["metadata"]["user_data"], json!("dGVzdA=="));
         Ok(())
     }
@@ -1142,6 +1163,7 @@ mod tests {
             region: "jp-tyo-3".to_owned(),
             instance_type: "g6-nanode-1".to_owned(),
             image: "linode/debian13".to_owned(),
+            disk_encryption: super::DiskEncryption::Disabled,
             ipv4: vec!["192.168.1.1".to_owned(), "203.0.113.10".to_owned()],
             tags: Vec::new(),
         };
@@ -1163,6 +1185,7 @@ mod tests {
             region: "jp-tyo-3".to_owned(),
             instance_type: "g6-nanode-1".to_owned(),
             image: "linode/debian13".to_owned(),
+            disk_encryption: super::DiskEncryption::Disabled,
             ipv4: Vec::new(),
             tags: vec![
                 "mcserver-managed".to_owned(),
@@ -1172,6 +1195,27 @@ mod tests {
         assert!(instance.is_owned_by("mcserver-owned", "mcserver-scope-production"));
         assert!(!instance.is_owned_by("mcserver-other", "mcserver-scope-production"));
         assert!(!instance.is_owned_by("mcserver-owned", "mcserver-scope-staging"));
+    }
+
+    #[test]
+    fn provider_configuration_rejects_enabled_disk_encryption() {
+        let instance = ProviderInstance {
+            id: 1,
+            label: "mcserver-owned".to_owned(),
+            region: "jp-tyo-3".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
+            disk_encryption: super::DiskEncryption::Enabled,
+            ipv4: Vec::new(),
+            tags: Vec::new(),
+        };
+
+        assert!(matches!(
+            instance.verify_configuration("jp-tyo-3", "g6-nanode-1", "linode/debian13"),
+            Err(AkamaiComputeError::DiskEncryptionEnabled {
+                provider_instance_id: 1
+            })
+        ));
     }
 
     #[test]
