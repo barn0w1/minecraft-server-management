@@ -52,6 +52,16 @@ def require_executable(path: Path, description: str) -> Path:
     return resolved
 
 
+def openssl_executable(value: str) -> Path:
+    resolved = shutil.which(value)
+    if resolved is None:
+        raise argparse.ArgumentTypeError(
+            f"OpenSSL executable was not found: {value!r}; install OpenSSL or pass "
+            "--openssl-binary PATH"
+        )
+    return Path(resolved).resolve()
+
+
 class FakeAkamaiState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -378,14 +388,14 @@ class FakeAkamaiServer(ThreadingHTTPServer):
         self.state = state
 
 
-def generate_tls(work: Path) -> tuple[Path, Path, Path, Path]:
+def generate_tls(work: Path, openssl: Path) -> tuple[Path, Path, Path, Path]:
     server_certificate = work / "remote-agent.crt"
     server_private_key = work / "remote-agent.key"
     client_ca_certificate = work / "agent-client-ca.crt"
     client_ca_private_key = work / "agent-client-ca.key"
     subprocess.run(
         [
-            "openssl",
+            str(openssl),
             "req",
             "-x509",
             "-newkey",
@@ -414,7 +424,7 @@ def generate_tls(work: Path) -> tuple[Path, Path, Path, Path]:
     )
     subprocess.run(
         [
-            "openssl",
+            str(openssl),
             "req",
             "-x509",
             "-newkey",
@@ -578,6 +588,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("target/debug/mcserver-node-agent"),
     )
+    parser.add_argument(
+        "--openssl-binary",
+        type=openssl_executable,
+        default=os.environ.get("MCSERVER_CONTROL_PLANE_OPENSSL_BINARY", "openssl"),
+        help=(
+            "OpenSSL executable used by the test and control plane "
+            "(default: MCSERVER_CONTROL_PLANE_OPENSSL_BINARY or openssl)"
+        ),
+    )
     parser.add_argument("--work-directory", type=Path, default=None)
     parser.add_argument("--keep-work-directory", action="store_true")
     return parser.parse_args()
@@ -589,6 +608,7 @@ def main() -> int:
     local = load_local_e2e(repository_root)
     control_plane = require_executable(args.control_plane_binary, "control-plane binary")
     node_agent = require_executable(args.node_agent_binary, "node-agent binary")
+    openssl = args.openssl_binary
     fake_podman = require_executable(repository_root / "scripts/fakes/podman.py", "fake Podman")
     fake_restic = require_executable(repository_root / "scripts/fakes/restic.py", "fake restic")
 
@@ -612,7 +632,7 @@ def main() -> int:
         private_key,
         client_ca_certificate,
         client_ca_private_key,
-    ) = generate_tls(work)
+    ) = generate_tls(work, openssl)
     authorized_keys = work / "authorized_keys"
     authorized_keys.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE2Etest remote-e2e\n")
     agent_environment = work / "node-agent.env"
@@ -655,6 +675,7 @@ def main() -> int:
             "MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_PRIVATE_KEY": str(client_ca_private_key),
             "MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_WORK_DIRECTORY": str(work / "agent-pki"),
             "MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_VALIDITY_SECONDS": "7200",
+            "MCSERVER_CONTROL_PLANE_OPENSSL_BINARY": str(openssl),
             "MCSERVER_CONTROL_PLANE_AGENT_TRUST_DOMAIN": "remote-e2e.invalid",
             "MCSERVER_CONTROL_PLANE_NODE_AGENT_DOWNLOAD_URL": "https://example.invalid/mcserver-node-agent",
             "MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256": "0" * 64,
@@ -874,7 +895,7 @@ def main() -> int:
                         raise RuntimeError("remote agent reconnect token was not rotated")
                     subprocess.run(
                         [
-                            "openssl",
+                            str(openssl),
                             "verify",
                             "-purpose",
                             "sslclient",

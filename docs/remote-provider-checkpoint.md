@@ -3,6 +3,25 @@
 This checkpoint proves the remote compute architecture without creating billable resources. The next
 operator-controlled boundary is the [production deployment checkpoint](production-deployment-checkpoint.md).
 
+## Prerequisites
+
+The remote provider E2E requires the OpenSSL command-line executable for test certificate generation
+and for the control plane's client-certificate authority. Install it before running the checkpoint:
+
+```bash
+# Fedora, AlmaLinux, or RHEL
+sudo dnf install openssl
+
+# Debian or Ubuntu
+sudo apt-get install openssl
+```
+
+If OpenSSL is installed outside `PATH`, pass its location explicitly:
+
+```bash
+python3 scripts/remote_provider_e2e.py --openssl-binary /path/to/openssl
+```
+
 ## Acceptance criteria
 
 ```bash
