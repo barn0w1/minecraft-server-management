@@ -171,7 +171,8 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
+# Rootful Podman manages state across /var, /run, and /etc.
+ProtectSystem=true
 # Rootful Podman networking needs to configure namespace-scoped sysctls.
 ProtectKernelTunables=false
 ProtectKernelModules=true
@@ -181,7 +182,6 @@ LockPersonality=true
 Delegate=yes
 TasksMax=infinity
 KillMode=mixed
-ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers /run/lock
 
 [Install]
 WantedBy=multi-user.target
@@ -214,9 +214,9 @@ mod tests {
         assert!(!unit.contains("RestrictSUIDSGID=true\n"));
         assert!(unit.contains("ProtectKernelTunables=false\n"));
         assert!(!unit.contains("ProtectKernelTunables=true\n"));
-        assert!(unit.contains(
-            "ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers /run/lock\n"
-        ));
+        assert!(unit.contains("ProtectSystem=true\n"));
+        assert!(!unit.contains("ProtectSystem=strict\n"));
+        assert!(!unit.contains("ReadWritePaths="));
     }
 }
 
