@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 
 use mcserver_protocol::{
     json_rpc::{self, ErrorObject, Request, Response},
@@ -12,9 +12,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
+use tokio_rustls::{TlsConnector, rustls};
 use tracing::{info, warn};
 
 use crate::{
@@ -23,19 +24,40 @@ use crate::{
     executor::{AgentExecutor, ExecutorError},
 };
 
+const CONNECTION_TOKEN_FILE_NAME: &str = "connection-token";
+const MAX_CONNECTION_TOKEN_CHARS: usize = 256;
+
 pub async fn run(
     config: Config,
     executor: AgentExecutor,
     cancellation: CancellationToken,
 ) -> Result<(), TransportError> {
+    let mut connection_token = load_connection_token(&config).await?;
     let mut backoff = config.reconnect_min;
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
         }
 
-        match run_session(&config, &executor, cancellation.child_token()).await {
+        match run_session(
+            &config,
+            &connection_token,
+            &executor,
+            cancellation.child_token(),
+        )
+        .await
+        {
             Ok(SessionOutcome::Shutdown) => return Ok(()),
+            Ok(SessionOutcome::CredentialRotated(token)) => {
+                persist_connection_token(&config, &token).await?;
+                connection_token = token;
+                backoff = config.reconnect_min;
+                info!(
+                    compute_instance_id = %config.compute_instance_id,
+                    "persisted remote reconnect credential; reconnecting"
+                );
+                continue;
+            }
             Ok(SessionOutcome::Disconnected) => {
                 backoff = config.reconnect_min;
                 warn!("control-plane connection closed; reconnecting");
@@ -58,15 +80,15 @@ pub async fn run(
 
 async fn run_session(
     config: &Config,
+    connection_token: &str,
     executor: &AgentExecutor,
     cancellation: CancellationToken,
 ) -> Result<SessionOutcome, TransportError> {
     let stream = tokio::select! {
         () = cancellation.cancelled() => return Ok(SessionOutcome::Disconnected),
-        connected = TcpStream::connect(config.control_plane_address) => connected?,
+        connected = connect(config) => connected?,
     };
-    stream.set_nodelay(true)?;
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
 
     let registration_id = json!(1);
@@ -78,7 +100,7 @@ async fn run_session(
             "params": RegisterParams {
                 protocol_version: node_agent::PROTOCOL_VERSION,
                 compute_instance_id: config.compute_instance_id,
-                connection_token: config.connection_token.clone(),
+                connection_token: connection_token.to_owned(),
             },
             "id": registration_id,
         }),
@@ -93,6 +115,10 @@ async fn run_session(
     let result = response_result::<RegisterResult>(registration)?;
     if !result.accepted {
         return Err(TransportError::RegistrationRejected);
+    }
+    if let Some(token) = result.replacement_connection_token {
+        validate_connection_token(&token)?;
+        return Ok(SessionOutcome::CredentialRotated(token));
     }
     info!(compute_instance_id = %config.compute_instance_id, "registered with control plane");
 
@@ -114,6 +140,141 @@ async fn run_session(
             return Ok(SessionOutcome::Shutdown);
         }
     }
+}
+
+async fn load_connection_token(config: &Config) -> Result<String, TransportError> {
+    let path = connection_token_path(config);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(token) => {
+            let token = token.trim_end_matches(|character| matches!(character, '\r' | '\n')).to_owned();
+            validate_connection_token(&token)?;
+            Ok(token)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            validate_connection_token(&config.connection_token)?;
+            Ok(config.connection_token.clone())
+        }
+        Err(error) => Err(TransportError::CredentialIo { path, source: error }),
+    }
+}
+
+async fn persist_connection_token(
+    config: &Config,
+    token: &str,
+) -> Result<(), TransportError> {
+    validate_connection_token(token)?;
+    tokio::fs::create_dir_all(&config.state_directory)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: config.state_directory.clone(),
+            source,
+        })?;
+    tokio::fs::set_permissions(
+        &config.state_directory,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .await
+    .map_err(|source| TransportError::CredentialIo {
+        path: config.state_directory.clone(),
+        source,
+    })?;
+    let path = connection_token_path(config);
+    let temporary = config.state_directory.join("connection-token.tmp");
+    tokio::fs::write(&temporary, token)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.clone(),
+            source,
+        })?;
+    tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.clone(),
+            source,
+        })?;
+    let file = tokio::fs::File::open(&temporary)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.clone(),
+            source,
+        })?;
+    file.sync_all()
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.clone(),
+            source,
+        })?;
+    tokio::fs::rename(&temporary, &path)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: path.clone(),
+            source,
+        })?;
+    let directory = tokio::fs::File::open(&config.state_directory)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: config.state_directory.clone(),
+            source,
+        })?;
+    directory
+        .sync_all()
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: config.state_directory.clone(),
+            source,
+        })?;
+    Ok(())
+}
+
+fn connection_token_path(config: &Config) -> PathBuf {
+    config.state_directory.join(CONNECTION_TOKEN_FILE_NAME)
+}
+
+fn validate_connection_token(token: &str) -> Result<(), TransportError> {
+    if token.trim().is_empty()
+        || token.contains('\0')
+        || token.chars().count() > MAX_CONNECTION_TOKEN_CHARS
+    {
+        return Err(TransportError::InvalidConnectionToken);
+    }
+    Ok(())
+}
+
+type BoxedTransport = Box<dyn TransportStream>;
+
+trait TransportStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> TransportStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+async fn connect(config: &Config) -> Result<BoxedTransport, TransportError> {
+    let stream = TcpStream::connect(config.control_plane_address.as_str()).await?;
+    stream.set_nodelay(true)?;
+    let Some(tls) = config.tls.as_ref() else {
+        return Ok(Box::new(stream));
+    };
+
+    let ca_pem = tokio::fs::read(&tls.ca_certificate).await?;
+    let mut reader = std::io::BufReader::new(ca_pem.as_slice());
+    let certificates = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()?;
+    if certificates.is_empty() {
+        return Err(TransportError::TlsConfiguration(
+            "CA certificate file contains no certificates".to_owned(),
+        ));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        roots
+            .add(certificate)
+            .map_err(|error| TransportError::TlsConfiguration(error.to_string()))?;
+    }
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(tls.server_name.clone())
+        .map_err(|error| TransportError::TlsConfiguration(error.to_string()))?;
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let stream = connector.connect(server_name, stream).await?;
+    Ok(Box::new(stream))
 }
 
 async fn dispatch(
@@ -356,8 +517,9 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionOutcome {
+    CredentialRotated(String),
     Disconnected,
     Shutdown,
 }
@@ -368,6 +530,14 @@ pub enum TransportError {
     Io(#[from] io::Error),
     #[error("node-agent protocol serialization failed")]
     Serialization(#[from] serde_json::Error),
+    #[error("node-agent credential file {path:?} failed")]
+    CredentialIo {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("node-agent connection token is invalid")]
+    InvalidConnectionToken,
     #[error("control plane disconnected")]
     Disconnected,
     #[error("node-agent frame is too large: at least {actual} bytes, maximum {maximum} bytes")]
@@ -378,4 +548,6 @@ pub enum TransportError {
     RegistrationRejected,
     #[error("control plane returned an error: {code}: {message}")]
     Remote { code: i64, message: String },
+    #[error("TLS configuration is invalid: {0}")]
+    TlsConfiguration(String),
 }

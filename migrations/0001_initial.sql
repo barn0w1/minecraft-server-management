@@ -69,8 +69,20 @@ ON server_instances (server_id, fencing_token DESC, id);
 CREATE TABLE compute_instances (
     id TEXT PRIMARY KEY NOT NULL,
     server_instance_id TEXT NOT NULL REFERENCES server_instances (id),
-    provider TEXT NOT NULL CHECK (provider = 'local_process'),
+    provider TEXT NOT NULL CHECK (provider IN ('local_process', 'akamai')),
+    provider_instance_id TEXT CHECK (
+        provider_instance_id IS NULL
+        OR (length(trim(provider_instance_id)) > 0 AND length(provider_instance_id) <= 256 AND instr(provider_instance_id, char(0)) = 0)
+    ),
+    public_ipv4 TEXT CHECK (
+        public_ipv4 IS NULL
+        OR (length(trim(public_ipv4)) > 0 AND length(public_ipv4) <= 64 AND instr(public_ipv4, char(0)) = 0)
+    ),
     connection_token TEXT NOT NULL CHECK (length(trim(connection_token)) > 0 AND length(connection_token) <= 256 AND instr(connection_token, char(0)) = 0),
+    enrollment_token TEXT CHECK (
+        enrollment_token IS NULL
+        OR (length(trim(enrollment_token)) > 0 AND length(enrollment_token) <= 256 AND instr(enrollment_token, char(0)) = 0)
+    ),
     process_id INTEGER CHECK (process_id > 0),
     agent_connected_at_ms INTEGER CHECK (agent_connected_at_ms >= 0),
     shutdown_requested_at_ms INTEGER CHECK (shutdown_requested_at_ms >= 0),
@@ -82,6 +94,10 @@ CREATE TABLE compute_instances (
     CHECK (
         (terminated_at_ms IS NULL AND terminal_result IS NULL)
         OR (terminated_at_ms IS NOT NULL AND terminal_result IS NOT NULL)
+    ),
+    CHECK (
+        (provider = 'local_process' AND provider_instance_id IS NULL AND public_ipv4 IS NULL AND enrollment_token IS NULL)
+        OR (provider = 'akamai' AND process_id IS NULL)
     ),
     CHECK (agent_connected_at_ms IS NULL OR agent_connected_at_ms BETWEEN created_at_ms AND updated_at_ms),
     CHECK (shutdown_requested_at_ms IS NULL OR shutdown_requested_at_ms BETWEEN created_at_ms AND updated_at_ms),

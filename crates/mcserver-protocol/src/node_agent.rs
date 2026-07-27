@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub mod method {
     pub const AGENT_REGISTER: &str = "agent.register";
@@ -26,6 +26,8 @@ pub struct RegisterParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterResult {
     pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_connection_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -22,8 +22,8 @@ use uuid::Uuid;
 use crate::{
     agent::AgentRegistry,
     domain::{
-        Clock, ComputeInstance, ComputeInstanceId, ComputeTerminalResult, ServerInstance,
-        ServerInstanceId, SystemClock, UnixTimestampMillis,
+        Clock, ComputeInstance, ComputeInstanceId, ComputeProvider, ComputeTerminalResult,
+        ServerInstance, ServerInstanceId, SystemClock, UnixTimestampMillis,
     },
 };
 
@@ -278,12 +278,21 @@ impl LocalComputeManager {
     ) -> Result<(ComputeInstance, bool), LocalComputeError> {
         let (compute, mut changed) =
             match self.repository.get_active_for_instance(instance.id).await? {
-                Some(compute) => (compute, false),
+                Some(compute) if compute.provider == ComputeProvider::LocalProcess => {
+                    (compute, false)
+                }
+                Some(_) => return Err(LocalComputeError::WrongProvider),
                 None => {
-                    let token = Uuid::new_v4().to_string();
+                    let token = super::compute::new_connection_token();
                     let compute = self
                         .repository
-                        .create_for_instance(instance.id, &token, now)
+                        .create_for_instance(
+                            instance.id,
+                            ComputeProvider::LocalProcess,
+                            &token,
+                            None,
+                            now,
+                        )
                         .await?
                         .ok_or(LocalComputeError::CreateConflict)?;
                     (compute, true)
@@ -728,6 +737,8 @@ pub enum LocalComputeError {
     },
     #[error("spawned node-agent has no process id")]
     MissingProcessId,
+    #[error("local compute provider used for a non-local allocation")]
+    WrongProvider,
     #[error("local compute instance creation conflicted")]
     CreateConflict,
     #[error("local compute instance disappeared after update")]

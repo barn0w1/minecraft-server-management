@@ -18,6 +18,9 @@ const MAX_ENVIRONMENT_ENTRIES: usize = 128;
 const MAX_ENVIRONMENT_KEY_CHARS: usize = 128;
 const MAX_ENVIRONMENT_VALUE_CHARS: usize = 8192;
 const MAX_SNAPSHOT_ID_CHARS: usize = 256;
+const MAX_AKAMAI_REGION_CHARS: usize = 64;
+const MAX_AKAMAI_TYPE_CHARS: usize = 128;
+const MAX_AKAMAI_IMAGE_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -111,10 +114,57 @@ impl DesiredState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ComputeSpec {
     Local,
+    Akamai {
+        region: String,
+        instance_type: String,
+        image: String,
+        #[serde(default)]
+        firewall_id: Option<u64>,
+    },
+}
+
+impl ComputeSpec {
+    fn validate(&self) -> Result<(), ValidationError> {
+        let Self::Akamai {
+            region,
+            instance_type,
+            image,
+            firewall_id,
+        } = self
+        else {
+            return Ok(());
+        };
+
+        for (field, value, maximum) in [
+            ("compute.region", region.as_str(), MAX_AKAMAI_REGION_CHARS),
+            (
+                "compute.instance_type",
+                instance_type.as_str(),
+                MAX_AKAMAI_TYPE_CHARS,
+            ),
+            ("compute.image", image.as_str(), MAX_AKAMAI_IMAGE_CHARS),
+        ] {
+            require_non_blank(field, value)?;
+            require_maximum_length(field, value, maximum)?;
+            reject_nul(field, value)?;
+            if !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'/' | b'.')
+            }) {
+                return Err(ValidationError::InvalidComputeIdentifier {
+                    field,
+                    value: value.clone(),
+                });
+            }
+        }
+        if firewall_id.is_some_and(|value| value == 0) {
+            return Err(ValidationError::ZeroValue("compute.firewall_id"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +193,7 @@ pub struct ServerSpec {
 
 impl ServerSpec {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        self.compute.validate()?;
         for (field, value, maximum) in [
             (
                 "process.container_image",
@@ -357,6 +408,8 @@ pub enum ValidationError {
     InvalidTimestampOrder,
     #[error("invalid persisted value for {field}: {value}")]
     InvalidPersistedValue { field: &'static str, value: String },
+    #[error("{field} contains unsupported characters: {value}")]
+    InvalidComputeIdentifier { field: &'static str, value: String },
 }
 
 #[cfg(test)]
@@ -445,6 +498,38 @@ mod tests {
         assert!(matches!(
             spec.validate(),
             Err(ValidationError::EulaNotAccepted)
+        ));
+    }
+
+    #[test]
+    fn accepts_valid_akamai_compute_specification() {
+        let mut spec = valid_spec();
+        spec.compute = ComputeSpec::Akamai {
+            region: "jp-tyo-3".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
+            firewall_id: Some(123),
+        };
+
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_akamai_compute_identifier() {
+        let mut spec = valid_spec();
+        spec.compute = ComputeSpec::Akamai {
+            region: "us east".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
+            firewall_id: None,
+        };
+
+        assert!(matches!(
+            spec.validate(),
+            Err(ValidationError::InvalidComputeIdentifier {
+                field: "compute.region",
+                ..
+            })
         ));
     }
 }

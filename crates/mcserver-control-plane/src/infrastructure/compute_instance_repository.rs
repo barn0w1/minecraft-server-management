@@ -1,7 +1,7 @@
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
 use crate::domain::{
-    ComputeInstance, ComputeInstanceId, ComputeTerminalResult, ServerInstanceId,
+    ComputeInstance, ComputeInstanceId, ComputeProvider, ComputeTerminalResult, ServerInstanceId,
     UnixTimestampMillis,
 };
 
@@ -16,7 +16,11 @@ const SELECT_BY_ID: &str = r#"
     SELECT
         id,
         server_instance_id,
+        provider,
+        provider_instance_id,
+        public_ipv4,
         connection_token,
+        enrollment_token,
         process_id,
         agent_connected_at_ms,
         shutdown_requested_at_ms,
@@ -33,7 +37,11 @@ const SELECT_ACTIVE_FOR_INSTANCE: &str = r#"
     SELECT
         id,
         server_instance_id,
+        provider,
+        provider_instance_id,
+        public_ipv4,
         connection_token,
+        enrollment_token,
         process_id,
         agent_connected_at_ms,
         shutdown_requested_at_ms,
@@ -46,12 +54,41 @@ const SELECT_ACTIVE_FOR_INSTANCE: &str = r#"
     WHERE server_instance_id = ? AND terminated_at_ms IS NULL
 "#;
 
-const SELECT_ACTIVE_OWNERSHIP: &str = r#"
+const SELECT_ACTIVE_LOCAL_OWNERSHIP: &str = r#"
     SELECT id, server_instance_id
     FROM compute_instances
-    WHERE terminated_at_ms IS NULL
+    WHERE terminated_at_ms IS NULL AND provider = 'local_process'
     ORDER BY id
 "#;
+
+const SELECT_ACTIVE_AKAMAI: &str = r#"
+    SELECT
+        id,
+        server_instance_id,
+        provider,
+        provider_instance_id,
+        public_ipv4,
+        connection_token,
+        enrollment_token,
+        process_id,
+        agent_connected_at_ms,
+        shutdown_requested_at_ms,
+        terminated_at_ms,
+        terminal_result,
+        failure_message,
+        created_at_ms,
+        updated_at_ms
+    FROM compute_instances
+    WHERE terminated_at_ms IS NULL AND provider = 'akamai'
+    ORDER BY id
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentAuthentication {
+    Accepted,
+    ReplaceToken(String),
+    Rejected,
+}
 
 #[derive(Debug, Clone)]
 pub struct ComputeInstanceRepository {
@@ -67,7 +104,9 @@ impl ComputeInstanceRepository {
     pub async fn create_for_instance(
         &self,
         server_instance_id: ServerInstanceId,
+        provider: ComputeProvider,
         connection_token: &str,
+        enrollment_token: Option<&str>,
         now: UnixTimestampMillis,
     ) -> Result<Option<ComputeInstance>, RepositoryError> {
         let id = ComputeInstanceId::new();
@@ -78,10 +117,11 @@ impl ComputeInstanceRepository {
                 server_instance_id,
                 provider,
                 connection_token,
+                enrollment_token,
                 created_at_ms,
                 updated_at_ms
             )
-            SELECT ?, ?, 'local_process', ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
                 SELECT 1
                 FROM server_instances
@@ -96,7 +136,9 @@ impl ComputeInstanceRepository {
         )
         .bind(id.to_string())
         .bind(server_instance_id.to_string())
+        .bind(provider.as_str())
         .bind(connection_token)
+        .bind(enrollment_token)
         .bind(now.as_millis())
         .bind(now.as_millis())
         .bind(server_instance_id.to_string())
@@ -134,10 +176,10 @@ impl ComputeInstanceRepository {
         row.as_ref().map(decode_compute_instance).transpose()
     }
 
-    pub async fn list_active_ownership(
+    pub async fn list_active_local_ownership(
         &self,
     ) -> Result<Vec<(ComputeInstanceId, ServerInstanceId)>, RepositoryError> {
-        let rows = sqlx::query(SELECT_ACTIVE_OWNERSHIP)
+        let rows = sqlx::query(SELECT_ACTIVE_LOCAL_OWNERSHIP)
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter()
@@ -153,6 +195,13 @@ impl ComputeInstanceRepository {
             .collect()
     }
 
+    pub async fn list_active_akamai(&self) -> Result<Vec<ComputeInstance>, RepositoryError> {
+        let rows = sqlx::query(SELECT_ACTIVE_AKAMAI)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(decode_compute_instance).collect()
+    }
+
     pub async fn record_process_id(
         &self,
         id: ComputeInstanceId,
@@ -166,7 +215,7 @@ impl ComputeInstanceRepository {
                 process_id = ?,
                 failure_message = NULL,
                 updated_at_ms = max(?, updated_at_ms, created_at_ms)
-            WHERE id = ? AND terminated_at_ms IS NULL
+            WHERE id = ? AND terminated_at_ms IS NULL AND provider = 'local_process'
             "#,
         )
         .bind(i64::from(process_id))
@@ -177,12 +226,79 @@ impl ComputeInstanceRepository {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn mark_agent_connected(
+    pub async fn record_provider_instance(
         &self,
         id: ComputeInstanceId,
+        provider_instance_id: &str,
+        public_ipv4: Option<&str>,
         now: UnixTimestampMillis,
     ) -> Result<bool, RepositoryError> {
         let result = sqlx::query(
+            r#"
+            UPDATE compute_instances
+            SET
+                provider_instance_id = ?,
+                public_ipv4 = ?,
+                failure_message = NULL,
+                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE id = ? AND terminated_at_ms IS NULL AND provider = 'akamai'
+            "#,
+        )
+        .bind(provider_instance_id)
+        .bind(public_ipv4)
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn authenticate_agent(
+        &self,
+        id: ComputeInstanceId,
+        expected_provider: ComputeProvider,
+        presented_token: &str,
+        now: UnixTimestampMillis,
+    ) -> Result<AgentAuthentication, RepositoryError> {
+        let accepted = sqlx::query(
+            r#"
+            UPDATE compute_instances
+            SET
+                enrollment_token = CASE
+                    WHEN provider = 'akamai' THEN NULL
+                    ELSE enrollment_token
+                END,
+                agent_connected_at_ms = max(
+                    coalesce(agent_connected_at_ms, 0),
+                    ?,
+                    updated_at_ms,
+                    created_at_ms
+                ),
+                failure_message = NULL,
+                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            WHERE
+                id = ?
+                AND provider = ?
+                AND connection_token = ?
+                AND terminated_at_ms IS NULL
+            "#,
+        )
+        .bind(now.as_millis())
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .bind(expected_provider.as_str())
+        .bind(presented_token)
+        .execute(&self.pool)
+        .await?;
+        if accepted.rows_affected() == 1 {
+            return Ok(AgentAuthentication::Accepted);
+        }
+
+        if expected_provider != ComputeProvider::Akamai {
+            return Ok(AgentAuthentication::Rejected);
+        }
+
+        let enrollment = sqlx::query(
             r#"
             UPDATE compute_instances
             SET
@@ -194,15 +310,26 @@ impl ComputeInstanceRepository {
                 ),
                 failure_message = NULL,
                 updated_at_ms = max(?, updated_at_ms, created_at_ms)
-            WHERE id = ? AND terminated_at_ms IS NULL
+            WHERE
+                id = ?
+                AND provider = 'akamai'
+                AND enrollment_token = ?
+                AND terminated_at_ms IS NULL
+            RETURNING connection_token
             "#,
         )
         .bind(now.as_millis())
         .bind(now.as_millis())
         .bind(id.to_string())
-        .execute(&self.pool)
+        .bind(presented_token)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(result.rows_affected() == 1)
+        match enrollment {
+            Some(row) => Ok(AgentAuthentication::ReplaceToken(
+                row.try_get("connection_token")?,
+            )),
+            None => Ok(AgentAuthentication::Rejected),
+        }
     }
 
     pub async fn request_shutdown(
@@ -285,7 +412,11 @@ fn decode_compute_instance(row: &SqliteRow) -> Result<ComputeInstance, Repositor
     let id = decode_uuid(row.try_get::<String, _>("id")?).map(ComputeInstanceId::from_uuid)?;
     let server_instance_id = decode_uuid(row.try_get::<String, _>("server_instance_id")?)
         .map(ServerInstanceId::from_uuid)?;
+    let provider = ComputeProvider::parse(&row.try_get::<String, _>("provider")?)?;
+    let provider_instance_id = row.try_get("provider_instance_id")?;
+    let public_ipv4 = row.try_get("public_ipv4")?;
     let connection_token = row.try_get("connection_token")?;
+    let enrollment_token = row.try_get("enrollment_token")?;
     let process_id = row
         .try_get::<Option<i64>, _>("process_id")?
         .map(|value| u32::try_from(value).map_err(|_| RepositoryError::IntegerOutOfRange))
@@ -305,7 +436,11 @@ fn decode_compute_instance(row: &SqliteRow) -> Result<ComputeInstance, Repositor
     ComputeInstance::rehydrate(
         id,
         server_instance_id,
+        provider,
+        provider_instance_id,
+        public_ipv4,
         connection_token,
+        enrollment_token,
         process_id,
         agent_connected_at,
         shutdown_requested_at,
@@ -319,9 +454,6 @@ fn decode_compute_instance(row: &SqliteRow) -> Result<ComputeInstance, Repositor
 }
 
 fn truncate_chars(value: &str, maximum: usize) -> String {
-    if value.chars().count() <= maximum {
-        return value.to_owned();
-    }
     value.chars().take(maximum).collect()
 }
 

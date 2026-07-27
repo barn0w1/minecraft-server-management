@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 mcserver-protocol = { path = "../mcserver-protocol" }
 serde.workspace = true
 serde_json.workspace = true

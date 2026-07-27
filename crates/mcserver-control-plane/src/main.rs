@@ -1,12 +1,13 @@
 use std::{error::Error, fmt::Display, time::Duration};
 
 use mcserver_control_plane::{
-    agent::{AgentRegistry, AgentServer, AgentServerError},
+    agent::{AgentRegistry, AgentServer, AgentServerError, TlsAgentServer},
     application::{ServerInstanceService, ServerService, ServerStatusService},
     config::Config,
     infrastructure::{
-        ComputeInstanceRepository, LocalComputeError, LocalComputeManager,
-        ServerInstanceRepository, ServerRepository, SnapshotRepository, connect_database,
+        AkamaiComputeManager, ComputeError, ComputeInstanceRepository, ComputeManager,
+        LocalComputeManager, ServerInstanceRepository, ServerRepository, SnapshotRepository,
+        connect_database,
     },
     interface::{ClientRpcHandler, UnixSocketError, UnixSocketServer},
     reconciliation::{ReconcileFatalError, ReconcileWorker},
@@ -54,10 +55,11 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         config.local_process_stop_timeout,
     );
     if config.reap_orphans_on_start {
-        let active_compute_ownership = compute_repository.list_active_ownership().await?;
+        let active_compute_ownership = compute_repository.list_active_local_ownership().await?;
         let summary = local_compute
             .reap_orphans(&active_compute_ownership)
-            .await?;
+            .await
+            .map_err(ComputeError::from)?;
         if summary.containers_removed > 0
             || summary.processes_stopped > 0
             || summary.state_directories_removed > 0
@@ -71,12 +73,46 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         }
     }
 
+    let akamai_compute = match (config.akamai.clone(), config.remote_agent.clone()) {
+        (Some(akamai), Some(remote)) => {
+            let reap_orphans = akamai.reap_orphans_on_start;
+            let manager = AkamaiComputeManager::new(
+                compute_repository.clone(),
+                agents.clone(),
+                akamai,
+                remote,
+                config.agent_command_timeout,
+            )
+            .map_err(ComputeError::from)?;
+            if reap_orphans {
+                let active = compute_repository.list_active_akamai().await?;
+                let summary = manager
+                    .reap_orphans(&active)
+                    .await
+                    .map_err(ComputeError::from)?;
+                if summary.instances_adopted > 0 || summary.instances_deleted > 0 {
+                    info!(
+                        instances_adopted = summary.instances_adopted,
+                        instances_deleted = summary.instances_deleted,
+                        "reconciled managed Akamai instances during startup"
+                    );
+                }
+            }
+            Some(manager)
+        }
+        (None, _) => None,
+        (Some(_), None) => return Err(ControlPlaneError::InvalidConfiguration(
+            "Akamai provider requires remote TLS agent configuration".to_owned(),
+        )),
+    };
+    let compute_manager = ComputeManager::new(local_compute, akamai_compute);
+
     let (reconcile_scheduler, reconcile_worker) = ReconcileWorker::channel(
         server_repository.clone(),
         instance_repository.clone(),
         compute_repository.clone(),
         snapshot_repository,
-        local_compute,
+        compute_manager,
         agents.clone(),
         config.reconcile_interval,
         config.reconcile_retry,
@@ -99,13 +135,29 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
 
     let agent_server = AgentServer::bind(
         config.agent_listen_address,
-        agents,
-        compute_repository,
-        reconcile_scheduler,
+        agents.clone(),
+        compute_repository.clone(),
+        reconcile_scheduler.clone(),
         config.max_frame_bytes,
         config.agent_command_timeout,
     )
     .await?;
+    let remote_agent_server = match config.remote_agent.as_ref() {
+        Some(remote) => Some(
+            TlsAgentServer::bind(
+                remote.listen_address,
+                &remote.tls_certificate,
+                &remote.tls_private_key,
+                agents.clone(),
+                compute_repository.clone(),
+                reconcile_scheduler.clone(),
+                config.max_frame_bytes,
+                config.agent_command_timeout,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let socket_server = UnixSocketServer::bind(
         config.socket_path,
         config.socket_mode,
@@ -125,6 +177,14 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         let cancellation = cancellation.child_token();
         async move { ServiceExit::AgentServer(agent_server.run(cancellation).await) }
     });
+    if let Some(remote_agent_server) = remote_agent_server {
+        services.spawn({
+            let cancellation = cancellation.child_token();
+            async move {
+                ServiceExit::RemoteAgentServer(remote_agent_server.run(cancellation).await)
+            }
+        });
+    }
     services.spawn({
         let cancellation = cancellation.child_token();
         async move { ServiceExit::Reconciler(reconcile_worker.run(cancellation).await) }
@@ -201,6 +261,7 @@ async fn drain_services(services: &mut JoinSet<ServiceExit>) -> Result<(), Contr
 enum ServiceExit {
     ClientSocket(Result<(), UnixSocketError>),
     AgentServer(Result<(), AgentServerError>),
+    RemoteAgentServer(Result<(), AgentServerError>),
     Reconciler(Result<(), ReconcileFatalError>),
 }
 
@@ -213,15 +274,21 @@ impl ServiceExit {
             Self::AgentServer(Ok(())) if unexpected => Some(
                 ControlPlaneError::UnexpectedServiceExit(ServiceName::AgentServer),
             ),
+            Self::RemoteAgentServer(Ok(())) if unexpected => Some(
+                ControlPlaneError::UnexpectedServiceExit(ServiceName::RemoteAgentServer),
+            ),
             Self::Reconciler(Ok(())) if unexpected => Some(
                 ControlPlaneError::UnexpectedServiceExit(ServiceName::Reconciler),
             ),
             Self::ClientSocket(Err(error)) => Some(ControlPlaneError::Socket(error)),
-            Self::AgentServer(Err(error)) => Some(ControlPlaneError::AgentServer(error)),
-            Self::Reconciler(Err(error)) => Some(ControlPlaneError::Reconcile(error)),
-            Self::ClientSocket(Ok(())) | Self::AgentServer(Ok(())) | Self::Reconciler(Ok(())) => {
-                None
+            Self::AgentServer(Err(error)) | Self::RemoteAgentServer(Err(error)) => {
+                Some(ControlPlaneError::AgentServer(error))
             }
+            Self::Reconciler(Err(error)) => Some(ControlPlaneError::Reconcile(error)),
+            Self::ClientSocket(Ok(()))
+            | Self::AgentServer(Ok(()))
+            | Self::RemoteAgentServer(Ok(()))
+            | Self::Reconciler(Ok(())) => None,
         }
     }
 }
@@ -230,6 +297,7 @@ impl ServiceExit {
 enum ServiceName {
     ClientSocket,
     AgentServer,
+    RemoteAgentServer,
     Reconciler,
     Unknown,
 }
@@ -238,7 +306,8 @@ impl Display for ServiceName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ClientSocket => formatter.write_str("client JSON-RPC socket"),
-            Self::AgentServer => formatter.write_str("node-agent JSON-RPC listener"),
+            Self::AgentServer => formatter.write_str("local node-agent JSON-RPC listener"),
+            Self::RemoteAgentServer => formatter.write_str("remote TLS node-agent listener"),
             Self::Reconciler => formatter.write_str("reconciler"),
             Self::Unknown => formatter.write_str("service supervisor"),
         }
@@ -249,8 +318,10 @@ impl Display for ServiceName {
 enum ControlPlaneError {
     #[error("database operation failed")]
     Repository(#[from] mcserver_control_plane::infrastructure::RepositoryError),
-    #[error("local compute operation failed: {0}")]
-    LocalCompute(#[from] LocalComputeError),
+    #[error("compute operation failed: {0}")]
+    Compute(#[from] ComputeError),
+    #[error("control-plane configuration is inconsistent: {0}")]
+    InvalidConfiguration(String),
     #[error("client JSON-RPC socket failed")]
     Socket(#[from] UnixSocketError),
     #[error("node-agent JSON-RPC listener failed")]

@@ -249,6 +249,17 @@ fn domain_spec(spec: client::ServerSpec) -> ServerSpec {
     ServerSpec {
         compute: match spec.compute {
             client::ComputeSpec::Local => ComputeSpec::Local,
+            client::ComputeSpec::Akamai {
+                region,
+                instance_type,
+                image,
+                firewall_id,
+            } => ComputeSpec::Akamai {
+                region,
+                instance_type,
+                image,
+                firewall_id,
+            },
         },
         process: ProcessSpec {
             container_image: spec.process.container_image,
@@ -269,6 +280,17 @@ fn protocol_spec(spec: ServerSpec) -> client::ServerSpec {
     client::ServerSpec {
         compute: match spec.compute {
             ComputeSpec::Local => client::ComputeSpec::Local,
+            ComputeSpec::Akamai {
+                region,
+                instance_type,
+                image,
+                firewall_id,
+            } => client::ComputeSpec::Akamai {
+                region,
+                instance_type,
+                image,
+                firewall_id,
+            },
         },
         process: client::ProcessSpec {
             container_image: spec.process.container_image,
@@ -337,6 +359,12 @@ fn protocol_compute_instance(compute: ComputeInstance) -> ComputeInstanceResourc
     ComputeInstanceResource {
         id: compute.id.as_uuid(),
         server_instance_id: compute.server_instance_id.as_uuid(),
+        provider: match compute.provider {
+            crate::domain::ComputeProvider::LocalProcess => client::ComputeProvider::LocalProcess,
+            crate::domain::ComputeProvider::Akamai => client::ComputeProvider::Akamai,
+        },
+        provider_instance_id: compute.provider_instance_id,
+        public_ipv4: compute.public_ipv4,
         process_id: compute.process_id,
         agent_connected_at_ms: compute.agent_connected_at.map(|value| value.as_millis()),
         shutdown_requested_at_ms: compute.shutdown_requested_at.map(|value| value.as_millis()),

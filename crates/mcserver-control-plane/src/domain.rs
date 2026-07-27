@@ -4,7 +4,8 @@ mod server_instance;
 mod time;
 
 pub use compute_instance::{
-    ComputeInstance, ComputeInstanceId, ComputeInstanceValidationError, ComputeTerminalResult,
+    ComputeInstance, ComputeInstanceId, ComputeInstanceValidationError, ComputeProvider,
+    ComputeTerminalResult,
 };
 pub use server::{
     ComputeSpec, DataSpec, DesiredState, ProcessSpec, Server, ServerId, ServerName, ServerSpec,

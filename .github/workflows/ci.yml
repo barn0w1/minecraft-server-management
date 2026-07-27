@@ -33,7 +33,11 @@ jobs:
       - name: Check Python scripts
         run: python3 -m py_compile scripts/*.py scripts/fakes/*.py
 
-      - name: Run deterministic vertical slice
-        run: |
-          cargo build --workspace
-          python3 scripts/deterministic_e2e.py
+      - name: Build integration binaries
+        run: cargo build --workspace
+
+      - name: Run deterministic local vertical slice
+        run: python3 scripts/deterministic_e2e.py
+
+      - name: Run deterministic remote provider slice
+        run: python3 scripts/remote_provider_e2e.py

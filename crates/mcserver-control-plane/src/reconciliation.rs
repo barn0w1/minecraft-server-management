@@ -16,7 +16,7 @@ use crate::{
         SystemClock, TerminalResult, UnixTimestampMillis,
     },
     infrastructure::{
-        ComputeInstanceRepository, LocalComputeError, LocalComputeManager, RepositoryError,
+        ComputeError, ComputeInstanceRepository, ComputeManager, RepositoryError,
         ServerInstanceRepository, ServerRepository, SnapshotRepository,
     },
     shutdown::CancellationToken,
@@ -59,7 +59,7 @@ pub struct ReconcileWorker {
     instance_repository: ServerInstanceRepository,
     compute_repository: ComputeInstanceRepository,
     snapshot_repository: SnapshotRepository,
-    local_compute: LocalComputeManager,
+    compute_manager: ComputeManager,
     agents: AgentRegistry,
     receiver: mpsc::Receiver<ReconcileRequest>,
     resync_interval: Duration,
@@ -75,7 +75,7 @@ impl ReconcileWorker {
         instance_repository: ServerInstanceRepository,
         compute_repository: ComputeInstanceRepository,
         snapshot_repository: SnapshotRepository,
-        local_compute: LocalComputeManager,
+        compute_manager: ComputeManager,
         agents: AgentRegistry,
         resync_interval: Duration,
         retry_interval: Duration,
@@ -89,7 +89,7 @@ impl ReconcileWorker {
                 instance_repository,
                 compute_repository,
                 snapshot_repository,
-                local_compute,
+                compute_manager,
                 agents,
                 receiver,
                 resync_interval,
@@ -220,7 +220,12 @@ impl ReconcileWorker {
             }
             Err(error) => {
                 let consecutive_failures = previous_failures.saturating_add(1);
-                let retry_delay = error_retry_delay(self.retry_interval, consecutive_failures);
+                let retry_delay = error
+                    .retry_after()
+                    .map(|delay| delay.max(self.retry_interval).min(MAX_ERROR_RETRY_DELAY))
+                    .unwrap_or_else(|| {
+                        error_retry_delay(self.retry_interval, consecutive_failures)
+                    });
                 warn!(
                     %server_id,
                     error = ?error,
@@ -328,7 +333,7 @@ impl ReconcileWorker {
     ) -> Result<StepOutcome, ReconcileError> {
         let provisioned_at = self.clock.now()?;
         let (compute, changed) = self
-            .local_compute
+            .compute_manager
             .ensure_for_instance(instance, provisioned_at)
             .await?;
         if changed {
@@ -420,9 +425,18 @@ impl ReconcileWorker {
             return Ok(StepOutcome::Stable);
         };
 
+        if !self.agents.is_connected(compute.id).await
+            && (instance.data_prepared_at.is_none() || instance.result_snapshot_id.is_some())
+        {
+            if self.compute_manager.delete(&compute).await? {
+                return Ok(StepOutcome::Changed);
+            }
+            return Ok(StepOutcome::Awaiting);
+        }
+
         let provisioned_at = self.clock.now()?;
         let (_, compute_changed) = self
-            .local_compute
+            .compute_manager
             .ensure_for_instance(instance, provisioned_at)
             .await?;
         if compute_changed {
@@ -520,7 +534,7 @@ impl ReconcileWorker {
             return Ok(StepOutcome::Changed);
         }
 
-        if self.local_compute.delete(&compute).await? {
+        if self.compute_manager.delete(&compute).await? {
             return Ok(StepOutcome::Changed);
         }
         Ok(StepOutcome::Awaiting)
@@ -614,14 +628,27 @@ enum ReconcileOutcome {
     Retry,
 }
 
+impl ReconcileError {
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Compute(error) => error.retry_after(),
+            Self::Repository(_)
+            | Self::Timestamp(_)
+            | Self::Agent(_)
+            | Self::DidNotConverge(_)
+            | Self::WritableDataLost(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ReconcileError {
     #[error("reconciliation persistence operation failed: {0}")]
     Repository(#[from] RepositoryError),
     #[error("reconciliation timestamp operation failed: {0}")]
     Timestamp(#[from] crate::domain::TimestampError),
-    #[error("local compute operation failed: {0}")]
-    LocalCompute(#[from] LocalComputeError),
+    #[error("compute operation failed: {0}")]
+    Compute(#[from] ComputeError),
     #[error("node-agent operation failed: {0}")]
     Agent(#[from] AgentCallError),
     #[error("server reconciliation did not converge for {0}")]

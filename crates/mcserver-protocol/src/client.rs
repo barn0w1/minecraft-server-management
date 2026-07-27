@@ -36,9 +36,23 @@ pub enum ComputeTerminalResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeProvider {
+    LocalProcess,
+    Akamai,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ComputeSpec {
     Local,
+    Akamai {
+        region: String,
+        instance_type: String,
+        image: String,
+        #[serde(default)]
+        firewall_id: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +165,9 @@ pub struct ListServerInstancesResult {
 pub struct ComputeInstanceResource {
     pub id: Uuid,
     pub server_instance_id: Uuid,
+    pub provider: ComputeProvider,
+    pub provider_instance_id: Option<String>,
+    pub public_ipv4: Option<String>,
     pub process_id: Option<u32>,
     pub agent_connected_at_ms: Option<i64>,
     pub shutdown_requested_at_ms: Option<i64>,

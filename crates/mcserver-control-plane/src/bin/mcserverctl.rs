@@ -44,10 +44,25 @@ async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliE
         Command::ServerStart { server_id } => set_desired_state(client, server_id, "running").await,
         Command::ServerStop { server_id } => set_desired_state(client, server_id, "stopped").await,
         Command::ServerCreate(options) => {
+            let compute = match options.compute {
+                CreateCompute::Local => json!({ "provider": "local" }),
+                CreateCompute::Akamai {
+                    region,
+                    instance_type,
+                    image,
+                    firewall_id,
+                } => json!({
+                    "provider": "akamai",
+                    "region": region,
+                    "instance_type": instance_type,
+                    "image": image,
+                    "firewall_id": firewall_id,
+                }),
+            };
             let params = json!({
                 "name": options.name,
                 "spec": {
-                    "compute": { "provider": "local" },
+                    "compute": compute,
                     "process": {
                         "container_image": options.container_image,
                         "server_type": options.server_type,
@@ -179,6 +194,7 @@ fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
 struct CreateOptions {
     name: String,
     repository: String,
+    compute: CreateCompute,
     container_image: String,
     server_type: String,
     version: String,
@@ -187,10 +203,25 @@ struct CreateOptions {
     environment: BTreeMap<String, String>,
 }
 
+enum CreateCompute {
+    Local,
+    Akamai {
+        region: String,
+        instance_type: String,
+        image: String,
+        firewall_id: Option<u64>,
+    },
+}
+
 impl CreateOptions {
     fn parse(arguments: &[String]) -> Result<Self, CliError> {
         let mut name = None;
         let mut repository = None;
+        let mut compute_provider = "local".to_owned();
+        let mut akamai_region = None;
+        let mut akamai_type = None;
+        let mut akamai_image = None;
+        let mut akamai_firewall_id = None;
         let mut container_image = DEFAULT_CONTAINER_IMAGE.to_owned();
         let mut server_type = DEFAULT_SERVER_TYPE.to_owned();
         let mut version = DEFAULT_MINECRAFT_VERSION.to_owned();
@@ -207,14 +238,31 @@ impl CreateOptions {
                     accept_eula = true;
                     index += 1;
                 }
-                "--name" | "--repository" | "--image" | "--type" | "--version" | "--port"
-                | "--stop-timeout" | "--env" => {
+                "--name" | "--repository" | "--compute" | "--akamai-region"
+                | "--akamai-type" | "--akamai-image" | "--akamai-firewall-id"
+                | "--image" | "--type" | "--version" | "--port" | "--stop-timeout"
+                | "--env" => {
                     let value = arguments
                         .get(index + 1)
                         .ok_or_else(|| CliError::MissingFlagValueOwned(flag.to_owned()))?;
                     match flag {
                         "--name" => name = Some(value.clone()),
                         "--repository" => repository = Some(value.clone()),
+                        "--compute" => compute_provider = value.clone(),
+                        "--akamai-region" => akamai_region = Some(value.clone()),
+                        "--akamai-type" => akamai_type = Some(value.clone()),
+                        "--akamai-image" => akamai_image = Some(value.clone()),
+                        "--akamai-firewall-id" => {
+                            let id = value.parse().map_err(|source| CliError::InvalidInteger {
+                                flag: "--akamai-firewall-id",
+                                value: value.clone(),
+                                source,
+                            })?;
+                            if id == 0 {
+                                return Err(CliError::ZeroValue("--akamai-firewall-id"));
+                            }
+                            akamai_firewall_id = Some(id);
+                        }
                         "--image" => container_image = value.clone(),
                         "--type" => server_type = value.clone(),
                         "--version" => version = value.clone(),
@@ -260,9 +308,21 @@ impl CreateOptions {
         if !accept_eula {
             return Err(CliError::EulaNotAccepted);
         }
+        let compute = match compute_provider.as_str() {
+            "local" => CreateCompute::Local,
+            "akamai" => CreateCompute::Akamai {
+                region: akamai_region.ok_or(CliError::MissingRequiredFlag("--akamai-region"))?,
+                instance_type: akamai_type
+                    .ok_or(CliError::MissingRequiredFlag("--akamai-type"))?,
+                image: akamai_image.ok_or(CliError::MissingRequiredFlag("--akamai-image"))?,
+                firewall_id: akamai_firewall_id,
+            },
+            _ => return Err(CliError::InvalidComputeProvider(compute_provider)),
+        };
         Ok(Self {
             name: name.ok_or(CliError::MissingRequiredFlag("--name"))?,
             repository: repository.ok_or(CliError::MissingRequiredFlag("--repository"))?,
+            compute,
             container_image,
             server_type,
             version,
@@ -298,6 +358,8 @@ enum CliError {
     InvalidUuid(#[source] uuid::Error),
     #[error("--env must use KEY=VALUE, got {0}")]
     InvalidEnvironment(String),
+    #[error("--compute must be local or akamai, got {0}")]
+    InvalidComputeProvider(String),
     #[error("server.create requires --accept-eula")]
     EulaNotAccepted,
     #[error("control-plane returned a server without a valid generation")]
@@ -316,12 +378,15 @@ const USAGE: &str = r#"Usage:
   mcserverctl [--socket PATH] server stop SERVER_ID
   mcserverctl [--socket PATH] server create \
     --name NAME --repository PATH --accept-eula \
-    [--image IMAGE] [--type TYPE] [--version VERSION] [--port PORT] \
-    [--stop-timeout SECONDS] [--env KEY=VALUE]..."#;
+    [--compute local|akamai] \
+    [--akamai-region REGION --akamai-type TYPE --akamai-image IMAGE] \
+    [--akamai-firewall-id ID] [--image IMAGE] [--type TYPE] \
+    [--version VERSION] [--port PORT] [--stop-timeout SECONDS] \
+    [--env KEY=VALUE]..."#;
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, Command, CreateOptions, parse_command};
+    use super::{CliError, Command, CreateCompute, CreateOptions, parse_command};
 
     #[test]
     fn parses_status_command() {
@@ -345,5 +410,37 @@ mod tests {
             "0".to_owned(),
         ]);
         assert!(matches!(result, Err(CliError::ZeroValue("--port"))));
+    }
+
+    #[test]
+    fn parses_akamai_create_options() {
+        let result = CreateOptions::parse(&[
+            "--name".to_owned(),
+            "remote".to_owned(),
+            "--repository".to_owned(),
+            "s3:s3.example.invalid/bucket".to_owned(),
+            "--accept-eula".to_owned(),
+            "--compute".to_owned(),
+            "akamai".to_owned(),
+            "--akamai-region".to_owned(),
+            "jp-tyo-3".to_owned(),
+            "--akamai-type".to_owned(),
+            "g6-nanode-1".to_owned(),
+            "--akamai-image".to_owned(),
+            "linode/debian13".to_owned(),
+            "--akamai-firewall-id".to_owned(),
+            "123".to_owned(),
+        ]);
+
+        assert!(matches!(
+            result,
+            Ok(CreateOptions {
+                compute: CreateCompute::Akamai {
+                    firewall_id: Some(123),
+                    ..
+                },
+                ..
+            })
+        ));
     }
 }

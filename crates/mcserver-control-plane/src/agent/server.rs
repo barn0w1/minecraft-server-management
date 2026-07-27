@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use mcserver_protocol::{
     json_rpc::{self, ErrorObject, Request, Response},
@@ -8,17 +8,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    sync::{Semaphore, mpsc},
     task::JoinSet,
 };
+use tokio_rustls::{TlsAcceptor, rustls};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    domain::{Clock, ComputeInstanceId, SystemClock},
-    infrastructure::ComputeInstanceRepository,
+    domain::{Clock, ComputeInstanceId, ComputeProvider, SystemClock},
+    infrastructure::{AgentAuthentication, ComputeInstanceRepository},
     reconciliation::ReconcileScheduler,
     shutdown::CancellationToken,
 };
@@ -26,15 +27,29 @@ use crate::{
 use super::registry::{AgentCallError, AgentCommand, AgentRegistry};
 
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
+const MAX_CONCURRENT_AGENT_CONNECTIONS: usize = 256;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub struct AgentServer {
-    listener: TcpListener,
+type BoxedAgentStream = Box<dyn AgentStream>;
+
+trait AgentStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> AgentStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+#[derive(Clone)]
+struct ConnectionContext {
     registry: AgentRegistry,
     compute_repository: ComputeInstanceRepository,
     reconcile_scheduler: ReconcileScheduler,
     max_frame_bytes: usize,
     command_timeout: Duration,
+    expected_provider: ComputeProvider,
     clock: SystemClock,
+}
+
+pub struct AgentServer {
+    listener: TcpListener,
+    context: ConnectionContext,
 }
 
 impl AgentServer {
@@ -47,91 +62,184 @@ impl AgentServer {
         command_timeout: Duration,
     ) -> Result<Self, AgentServerError> {
         let listener = TcpListener::bind(address).await?;
-        info!(address = %listener.local_addr()?, "node-agent JSON-RPC listener is ready");
+        info!(address = %listener.local_addr()?, "local node-agent JSON-RPC listener is ready");
         Ok(Self {
             listener,
-            registry,
-            compute_repository,
-            reconcile_scheduler,
-            max_frame_bytes,
-            command_timeout,
-            clock: SystemClock,
+            context: ConnectionContext {
+                registry,
+                compute_repository,
+                reconcile_scheduler,
+                max_frame_bytes,
+                command_timeout,
+                expected_provider: ComputeProvider::LocalProcess,
+                clock: SystemClock,
+            },
         })
     }
 
     pub async fn run(self, cancellation: CancellationToken) -> Result<(), AgentServerError> {
-        let mut connections = JoinSet::new();
-        loop {
-            tokio::select! {
-                () = cancellation.cancelled() => break,
-                accepted = self.listener.accept() => {
-                    let (stream, peer) = accepted?;
-                    debug!(%peer, "accepted node-agent connection");
-                    let registry = self.registry.clone();
-                    let compute_repository = self.compute_repository.clone();
-                    let reconcile_scheduler = self.reconcile_scheduler.clone();
-                    let child_cancellation = cancellation.child_token();
-                    let maximum = self.max_frame_bytes;
-                    let command_timeout = self.command_timeout;
-                    let clock = self.clock;
-                    connections.spawn(async move {
-                        if let Err(error) = handle_connection(
-                            stream,
-                            registry,
-                            compute_repository,
-                            reconcile_scheduler,
-                            maximum,
-                            command_timeout,
-                            clock,
-                            child_cancellation,
-                        )
-                        .await
-                        {
-                            warn!(%peer, %error, "node-agent connection ended with an error");
-                        }
-                    });
-                }
-                completed = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(Err(error)) = completed {
-                        warn!(%error, "node-agent connection task failed");
-                    }
-                }
-            }
-        }
-
-        while let Some(result) = connections.join_next().await {
-            if let Err(error) = result {
-                warn!(%error, "node-agent connection task failed during shutdown");
-            }
-        }
-        info!("node-agent JSON-RPC listener stopped");
+        run_listener(self.listener, self.context, None, cancellation).await?;
+        info!("local node-agent JSON-RPC listener stopped");
         Ok(())
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct TlsAgentServer {
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    context: ConnectionContext,
+}
+
+impl TlsAgentServer {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind(
+        address: SocketAddr,
+        certificate_path: &Path,
+        private_key_path: &Path,
+        registry: AgentRegistry,
+        compute_repository: ComputeInstanceRepository,
+        reconcile_scheduler: ReconcileScheduler,
+        max_frame_bytes: usize,
+        command_timeout: Duration,
+    ) -> Result<Self, AgentServerError> {
+        let certificate = tokio::fs::read(certificate_path).await?;
+        let private_key = tokio::fs::read(private_key_path).await?;
+        let mut certificate_reader = std::io::BufReader::new(certificate.as_slice());
+        let certificates = rustls_pemfile::certs(&mut certificate_reader)
+            .collect::<Result<Vec<_>, _>>()?;
+        if certificates.is_empty() {
+            return Err(AgentServerError::TlsConfiguration(
+                "TLS certificate file contains no certificates".to_owned(),
+            ));
+        }
+        let mut private_key_reader = std::io::BufReader::new(private_key.as_slice());
+        let private_key = rustls_pemfile::private_key(&mut private_key_reader)?.ok_or_else(|| {
+            AgentServerError::TlsConfiguration(
+                "TLS private key file contains no supported private key".to_owned(),
+            )
+        })?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, private_key)
+            .map_err(|error| AgentServerError::TlsConfiguration(error.to_string()))?;
+        let listener = TcpListener::bind(address).await?;
+        info!(address = %listener.local_addr()?, "remote TLS node-agent listener is ready");
+        Ok(Self {
+            listener,
+            acceptor: TlsAcceptor::from(Arc::new(server_config)),
+            context: ConnectionContext {
+                registry,
+                compute_repository,
+                reconcile_scheduler,
+                max_frame_bytes,
+                command_timeout,
+                expected_provider: ComputeProvider::Akamai,
+                clock: SystemClock,
+            },
+        })
+    }
+
+    pub async fn run(self, cancellation: CancellationToken) -> Result<(), AgentServerError> {
+        run_listener(
+            self.listener,
+            self.context,
+            Some(self.acceptor),
+            cancellation,
+        )
+        .await?;
+        info!("remote TLS node-agent listener stopped");
+        Ok(())
+    }
+}
+
+async fn run_listener(
+    listener: TcpListener,
+    context: ConnectionContext,
+    tls_acceptor: Option<TlsAcceptor>,
+    cancellation: CancellationToken,
+) -> Result<(), AgentServerError> {
+    let mut connections = JoinSet::new();
+    let connection_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENT_CONNECTIONS));
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => break,
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted?;
+                let Ok(connection_permit) = Arc::clone(&connection_permits).try_acquire_owned() else {
+                    warn!(%peer, "node-agent connection limit reached; dropping connection");
+                    continue;
+                };
+                debug!(%peer, tls = tls_acceptor.is_some(), "accepted node-agent connection");
+                let context = context.clone();
+                let child_cancellation = cancellation.child_token();
+                let acceptor = tls_acceptor.clone();
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    let stream: Result<BoxedAgentStream, AgentServerError> = match acceptor {
+                        Some(acceptor) => match tokio::time::timeout(
+                            TLS_HANDSHAKE_TIMEOUT,
+                            acceptor.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(result) => result
+                                .map(|stream| Box::new(stream) as BoxedAgentStream)
+                                .map_err(AgentServerError::TlsHandshake),
+                            Err(_) => Err(AgentServerError::TlsHandshakeTimeout),
+                        },
+                        None => Ok(Box::new(stream) as BoxedAgentStream),
+                    };
+                    match stream {
+                        Ok(stream) => {
+                            if let Err(error) = handle_connection(
+                                stream,
+                                context,
+                                child_cancellation,
+                            )
+                            .await
+                            {
+                                warn!(%peer, %error, "node-agent connection ended with an error");
+                            }
+                        }
+                        Err(error) => warn!(%peer, %error, "node-agent TLS handshake failed"),
+                    }
+                });
+            }
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "node-agent connection task failed");
+                }
+            }
+        }
+    }
+
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result {
+            warn!(%error, "node-agent connection task failed during shutdown");
+        }
+    }
+    Ok(())
+}
+
 async fn handle_connection(
-    stream: TcpStream,
-    registry: AgentRegistry,
-    compute_repository: ComputeInstanceRepository,
-    reconcile_scheduler: ReconcileScheduler,
-    max_frame_bytes: usize,
-    command_timeout: Duration,
-    clock: SystemClock,
+    stream: BoxedAgentStream,
+    context: ConnectionContext,
     cancellation: CancellationToken,
 ) -> Result<(), AgentServerError> {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
-    let request = read_request(&mut reader, max_frame_bytes).await?;
+    let request = tokio::time::timeout(
+        REGISTRATION_TIMEOUT,
+        read_request(&mut reader, context.max_frame_bytes),
+    )
+    .await
+    .map_err(|_| AgentServerError::RegistrationTimeout)??;
     if !request.id.is_valid() {
         write_response(
             &mut writer,
             &Response::error(
                 Value::Null,
-                ErrorObject::new(
-                    json_rpc::error_code::INVALID_REQUEST,
-                    "Invalid registration",
-                ),
+                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
             ),
         )
         .await?;
@@ -149,10 +257,7 @@ async fn handle_connection(
             &mut writer,
             &Response::error(
                 response_id,
-                ErrorObject::new(
-                    json_rpc::error_code::INVALID_REQUEST,
-                    "Invalid registration",
-                ),
+                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
             ),
         )
         .await?;
@@ -198,59 +303,87 @@ async fn handle_connection(
     }
 
     let compute_id = ComputeInstanceId::from_uuid(params.compute_instance_id);
-    let Some(compute) = compute_repository.get(compute_id).await? else {
+    let Some(compute) = context.compute_repository.get(compute_id).await? else {
         reject_registration(&mut writer, response_id, "Unknown compute instance").await?;
         return Ok(());
     };
-    if !compute.is_active() || compute.connection_token != params.connection_token {
+    if !compute.is_active() || compute.provider != context.expected_provider {
         reject_registration(&mut writer, response_id, "Registration rejected").await?;
         return Ok(());
     }
 
-    let connected_at = clock.now()?;
-    if !compute_repository
-        .mark_agent_connected(compute_id, connected_at)
+    let connected_at = context.clock.now()?;
+    let replacement_connection_token = match context
+        .compute_repository
+        .authenticate_agent(
+            compute_id,
+            context.expected_provider,
+            &params.connection_token,
+            connected_at,
+        )
         .await?
     {
-        reject_registration(&mut writer, response_id, "Registration became stale").await?;
-        return Ok(());
-    }
+        AgentAuthentication::Accepted => None,
+        AgentAuthentication::ReplaceToken(token) => Some(token),
+        AgentAuthentication::Rejected => {
+            reject_registration(&mut writer, response_id, "Registration rejected").await?;
+            return Ok(());
+        }
+    };
 
     write_response(
         &mut writer,
         &Response::success(
             response_id,
-            serde_json::to_value(RegisterResult { accepted: true })?,
+            serde_json::to_value(RegisterResult {
+                accepted: true,
+                replacement_connection_token: replacement_connection_token.clone(),
+            })?,
         ),
     )
     .await?;
 
+    if replacement_connection_token.is_some() {
+        info!(
+            compute_instance_id = %compute_id,
+            "remote node agent enrollment accepted; reconnect token issued"
+        );
+        return Ok(());
+    }
+
     let session_id = Uuid::new_v4();
     let (sender, receiver) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-    registry.register(compute_id, session_id, sender).await;
-    reconcile_scheduler.enqueue_best_effort_for_instance(compute.server_instance_id);
+    context.registry.register(compute_id, session_id, sender).await;
+    context
+        .reconcile_scheduler
+        .enqueue_best_effort_for_instance(compute.server_instance_id);
     info!(compute_instance_id = %compute_id, "node agent registered");
 
     let result = run_session(
         &mut reader,
         &mut writer,
         receiver,
-        max_frame_bytes,
-        command_timeout,
+        context.max_frame_bytes,
+        context.command_timeout,
         cancellation,
     )
     .await;
-    registry.unregister(compute_id, session_id).await;
-    reconcile_scheduler.enqueue_best_effort_for_instance(compute.server_instance_id);
+    context.registry.unregister(compute_id, session_id).await;
+    context
+        .reconcile_scheduler
+        .enqueue_best_effort_for_instance(compute.server_instance_id);
     info!(compute_instance_id = %compute_id, "node agent disconnected");
     result
 }
 
-async fn reject_registration(
-    writer: &mut WriteHalf<TcpStream>,
+async fn reject_registration<W>(
+    writer: &mut W,
     id: Value,
     message: &str,
-) -> Result<(), AgentServerError> {
+) -> Result<(), AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
     write_response(
         writer,
         &Response::error(
@@ -261,14 +394,18 @@ async fn reject_registration(
     .await
 }
 
-async fn run_session(
-    reader: &mut BufReader<ReadHalf<TcpStream>>,
-    writer: &mut WriteHalf<TcpStream>,
+async fn run_session<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
     mut commands: mpsc::Receiver<AgentCommand>,
     max_frame_bytes: usize,
     command_timeout: Duration,
     cancellation: CancellationToken,
-) -> Result<(), AgentServerError> {
+) -> Result<(), AgentServerError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut next_id = 1_u64;
     loop {
         tokio::select! {
@@ -364,18 +501,24 @@ struct ErrorObjectWire {
     data: Option<Value>,
 }
 
-async fn read_request(
-    reader: &mut BufReader<ReadHalf<TcpStream>>,
+async fn read_request<R>(
+    reader: &mut BufReader<R>,
     max_frame_bytes: usize,
-) -> Result<Request, AgentServerError> {
+) -> Result<Request, AgentServerError>
+where
+    R: AsyncRead + Unpin,
+{
     let value = read_value(reader, max_frame_bytes).await?;
     serde_json::from_value(value).map_err(AgentServerError::Serialization)
 }
 
-async fn read_wire_response(
-    reader: &mut BufReader<ReadHalf<TcpStream>>,
+async fn read_wire_response<R>(
+    reader: &mut BufReader<R>,
     max_frame_bytes: usize,
-) -> Result<WireResponse, AgentCallError> {
+) -> Result<WireResponse, AgentCallError>
+where
+    R: AsyncRead + Unpin,
+{
     let value = read_value(reader, max_frame_bytes)
         .await
         .map_err(|error| match error {
@@ -386,10 +529,13 @@ async fn read_wire_response(
     serde_json::from_value(value).map_err(AgentCallError::Serialization)
 }
 
-async fn read_value(
-    reader: &mut BufReader<ReadHalf<TcpStream>>,
+async fn read_value<R>(
+    reader: &mut BufReader<R>,
     max_frame_bytes: usize,
-) -> Result<Value, AgentServerError> {
+) -> Result<Value, AgentServerError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut frame = Vec::new();
     let read = read_frame(reader, &mut frame, max_frame_bytes).await?;
     if read == 0 {
@@ -435,27 +581,30 @@ fn trim_line_ending(frame: &[u8]) -> &[u8] {
     frame.strip_suffix(b"\r").unwrap_or(frame)
 }
 
-async fn write_response(
-    writer: &mut WriteHalf<TcpStream>,
-    response: &Response,
-) -> Result<(), AgentServerError> {
+async fn write_response<W>(writer: &mut W, response: &Response) -> Result<(), AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
     write_value(writer, &serde_json::to_value(response)?).await
 }
 
-async fn write_command_request(
-    writer: &mut WriteHalf<TcpStream>,
+async fn write_command_request<W>(
+    writer: &mut W,
     request: &Value,
-) -> Result<(), AgentCallError> {
+) -> Result<(), AgentCallError>
+where
+    W: AsyncWrite + Unpin,
+{
     writer.write_all(&serde_json::to_vec(request)?).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
 }
 
-async fn write_value(
-    writer: &mut WriteHalf<TcpStream>,
-    value: &Value,
-) -> Result<(), AgentServerError> {
+async fn write_value<W>(writer: &mut W, value: &Value) -> Result<(), AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
     writer.write_all(&serde_json::to_vec(value)?).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;
@@ -474,6 +623,14 @@ pub enum AgentServerError {
     Serialization(#[from] serde_json::Error),
     #[error("node-agent protocol violation: {0}")]
     Protocol(String),
+    #[error("node-agent TLS configuration is invalid: {0}")]
+    TlsConfiguration(String),
+    #[error("node-agent TLS handshake failed")]
+    TlsHandshake(#[source] io::Error),
+    #[error("node-agent TLS handshake timed out")]
+    TlsHandshakeTimeout,
+    #[error("node-agent registration timed out")]
+    RegistrationTimeout,
     #[error("node-agent registration persistence failed")]
     Repository(#[from] crate::infrastructure::RepositoryError),
     #[error("node-agent registration timestamp failed")]

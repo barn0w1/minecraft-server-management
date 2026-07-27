@@ -15,7 +15,7 @@ use tokio::{fs, io::AsyncWriteExt, process::Command};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::config::{Config, DataAccessMode};
 
 const STATE_FILE_NAME: &str = "agent-state.json";
 const DATA_DIRECTORY_NAME: &str = "data";
@@ -88,7 +88,7 @@ impl AgentExecutor {
                     .await?;
             }
             None => {
-                self.remove_paths_in_user_namespace([self.data_directory()])
+                self.remove_paths([self.data_directory()])
                     .await?;
                 fs::create_dir_all(self.data_directory()).await?;
             }
@@ -262,7 +262,7 @@ impl AgentExecutor {
     }
 
     async fn remove_instance_storage(&self) -> Result<(), ExecutorError> {
-        self.remove_paths_in_user_namespace([
+        self.remove_paths([
             self.data_directory(),
             self.config
                 .state_directory
@@ -297,9 +297,9 @@ impl AgentExecutor {
 
         // Recover an interrupted directory swap before discarding stale staging data.
         if !path_exists(&data).await? && path_exists(&previous).await? {
-            self.move_path_in_user_namespace(&previous, &data).await?;
+            self.move_path(&previous, &data).await?;
         }
-        self.remove_paths_in_user_namespace([staging.clone(), previous.clone()])
+        self.remove_paths([staging.clone(), previous.clone()])
             .await?;
         fs::create_dir_all(&staging).await?;
         let staging_arg = path_to_string(&staging)?;
@@ -329,20 +329,20 @@ impl AgentExecutor {
         }
 
         if path_exists(&data).await? {
-            self.move_path_in_user_namespace(&data, &previous).await?;
+            self.move_path(&data, &previous).await?;
         }
         if let Err(error) = self
-            .move_path_in_user_namespace(&restored_data, &data)
+            .move_path(&restored_data, &data)
             .await
         {
             if path_exists(&previous).await.unwrap_or(false)
                 && !path_exists(&data).await.unwrap_or(true)
             {
-                let _ = self.move_path_in_user_namespace(&previous, &data).await;
+                let _ = self.move_path(&previous, &data).await;
             }
             return Err(error);
         }
-        self.remove_paths_in_user_namespace([previous, staging])
+        self.remove_paths([previous, staging])
             .await?;
         Ok(())
     }
@@ -506,45 +506,63 @@ impl AgentExecutor {
         current_directory: Option<&Path>,
     ) -> Result<Output, ExecutorError> {
         let retry_lock = format!("{}s", self.config.restic_retry_lock.as_secs());
-        let mut command = Command::new(&self.config.podman_binary);
+        let (mut command, description) = match self.config.data_access_mode {
+            DataAccessMode::PodmanUserNamespace => {
+                let mut command = Command::new(&self.config.podman_binary);
+                command.arg("unshare").arg(&self.config.restic_binary);
+                (command, "restic in Podman user namespace")
+            }
+            DataAccessMode::Host => (Command::new(&self.config.restic_binary), "restic"),
+        };
         command
             .env("RESTIC_REPOSITORY", repository)
-            .arg("unshare")
-            .arg(&self.config.restic_binary)
             .arg("--retry-lock")
             .arg(retry_lock)
             .args(arguments);
         if let Some(directory) = current_directory {
             command.current_dir(directory);
         }
-        self.run_command_allow_failure(command, "restic in Podman user namespace")
-            .await
+        self.run_command_allow_failure(command, description).await
     }
 
-    async fn remove_paths_in_user_namespace<const N: usize>(
+    async fn remove_paths<const N: usize>(
         &self,
         paths: [PathBuf; N],
     ) -> Result<(), ExecutorError> {
-        let mut command = Command::new(&self.config.podman_binary);
-        command.arg("unshare").arg("rm").arg("-rf").arg("--");
-        command.args(paths);
-        self.run_command(command, "podman unshare cleanup").await?;
+        match self.config.data_access_mode {
+            DataAccessMode::PodmanUserNamespace => {
+                let mut command = Command::new(&self.config.podman_binary);
+                command.arg("unshare").arg("rm").arg("-rf").arg("--");
+                command.args(paths);
+                self.run_command(command, "podman unshare cleanup").await?;
+            }
+            DataAccessMode::Host => {
+                for path in paths {
+                    remove_path(&path).await?;
+                }
+            }
+        }
         Ok(())
     }
 
-    async fn move_path_in_user_namespace(
+    async fn move_path(
         &self,
         source: &Path,
         destination: &Path,
     ) -> Result<(), ExecutorError> {
-        let mut command = Command::new(&self.config.podman_binary);
-        command
-            .arg("unshare")
-            .arg("mv")
-            .arg("--")
-            .arg(source)
-            .arg(destination);
-        self.run_command(command, "podman unshare move").await?;
+        match self.config.data_access_mode {
+            DataAccessMode::PodmanUserNamespace => {
+                let mut command = Command::new(&self.config.podman_binary);
+                command
+                    .arg("unshare")
+                    .arg("mv")
+                    .arg("--")
+                    .arg(source)
+                    .arg(destination);
+                self.run_command(command, "podman unshare move").await?;
+            }
+            DataAccessMode::Host => fs::rename(source, destination).await?,
+        }
         Ok(())
     }
 
@@ -701,6 +719,20 @@ fn path_to_string(path: &Path) -> Result<String, ExecutorError> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| ExecutorError::NonUtf8Path(path.to_path_buf()))
+}
+
+async fn remove_path(path: &Path) -> Result<(), ExecutorError> {
+    let metadata = match fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).await?;
+    } else {
+        fs::remove_file(path).await?;
+    }
+    Ok(())
 }
 
 async fn path_exists(path: &Path) -> Result<bool, ExecutorError> {
