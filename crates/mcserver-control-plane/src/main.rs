@@ -101,9 +101,11 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
             Some(manager)
         }
         (None, _) => None,
-        (Some(_), None) => return Err(ControlPlaneError::InvalidConfiguration(
-            "Akamai provider requires remote TLS agent configuration".to_owned(),
-        )),
+        (Some(_), None) => {
+            return Err(ControlPlaneError::InvalidConfiguration(
+                "Akamai provider requires remote TLS agent configuration".to_owned(),
+            ));
+        }
     };
     let compute_manager = ComputeManager::new(local_compute, akamai_compute);
 

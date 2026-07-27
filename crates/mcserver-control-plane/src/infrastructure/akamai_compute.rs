@@ -72,7 +72,10 @@ impl AkamaiComputeManager {
         active: &[ComputeInstance],
     ) -> Result<AkamaiOrphanReapSummary, AkamaiComputeError> {
         let mut summary = AkamaiOrphanReapSummary::default();
-        let managed = self.client.list_managed_instances(&self.config.scope).await?;
+        let managed = self
+            .client
+            .list_managed_instances(&self.config.scope)
+            .await?;
         for provider in managed {
             let Some(compute_id) = provider
                 .label()
@@ -93,9 +96,10 @@ impl AkamaiComputeManager {
                 .find(|compute| compute.id.as_uuid() == compute_id);
             match active_compute {
                 Some(compute)
-                    if compute.provider_instance_id.as_deref().is_none_or(|value| {
-                        value.parse::<u64>().ok() == Some(provider.id)
-                    }) =>
+                    if compute
+                        .provider_instance_id
+                        .as_deref()
+                        .is_none_or(|value| value.parse::<u64>().ok() == Some(provider.id)) =>
                 {
                     if compute.provider_instance_id.is_none() {
                         let now = self.clock.now()?;
@@ -114,7 +118,11 @@ impl AkamaiComputeManager {
                 _ => {
                     self.client.delete_instance(provider.id).await?;
                     summary.instances_deleted = summary.instances_deleted.saturating_add(1);
-                    info!(provider_instance_id = provider.id, label = provider.label(), "deleted orphaned Akamai instance");
+                    info!(
+                        provider_instance_id = provider.id,
+                        label = provider.label(),
+                        "deleted orphaned Akamai instance"
+                    );
                 }
             }
         }
@@ -164,11 +172,7 @@ impl AkamaiComputeManager {
                     .parse::<u64>()
                     .map_err(AkamaiComputeError::InvalidProviderId)?;
                 match self.client.get_instance(provider_id).await? {
-                    Some(provider)
-                        if provider.is_owned_by(&label, &self.scope_tag()) =>
-                    {
-                        provider
-                    }
+                    Some(provider) if provider.is_owned_by(&label, &self.scope_tag()) => provider,
                     Some(provider) => {
                         return Err(AkamaiComputeError::ProviderOwnershipMismatch {
                             provider_instance_id: provider.id,
@@ -355,12 +359,7 @@ impl AkamaiComputeManager {
         let deleted_at = self.clock.now()?;
         let changed = self
             .repository
-            .terminate(
-                compute.id,
-                ComputeTerminalResult::Deleted,
-                None,
-                deleted_at,
-            )
+            .terminate(compute.id, ComputeTerminalResult::Deleted, None, deleted_at)
             .await?;
         if changed {
             info!(compute_instance_id = %compute.id, provider_instance_id = ?provider_id, "Akamai compute instance deleted");
@@ -452,7 +451,11 @@ impl AkamaiClient {
                 .send()
                 .await?;
             let body: ListInstancesResponse = checked_response(response).await?.json().await?;
-            instances.extend(body.data.into_iter().filter(|instance| instance.label == label));
+            instances.extend(
+                body.data
+                    .into_iter()
+                    .filter(|instance| instance.label == label),
+            );
             if page >= body.pages.max(1) {
                 break;
             }
@@ -475,7 +478,11 @@ impl AkamaiClient {
             .json(request)
             .send()
             .await?;
-        checked_response(response).await?.json().await.map_err(Into::into)
+        checked_response(response)
+            .await?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
     async fn verify_bootstrap_compatibility(
@@ -534,7 +541,11 @@ impl AkamaiClient {
             .get(format!("{}/images/{image_id}", self.base_url))
             .send()
             .await?;
-        checked_response(response).await?.json().await.map_err(Into::into)
+        checked_response(response)
+            .await?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
     async fn get_region(&self, region_id: &str) -> Result<ProviderRegion, AkamaiComputeError> {
@@ -543,13 +554,14 @@ impl AkamaiClient {
             .get(format!("{}/regions/{region_id}", self.base_url))
             .send()
             .await?;
-        checked_response(response).await?.json().await.map_err(Into::into)
+        checked_response(response)
+            .await?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
-    async fn get_instance(
-        &self,
-        id: u64,
-    ) -> Result<Option<ProviderInstance>, AkamaiComputeError> {
+    async fn get_instance(&self, id: u64) -> Result<Option<ProviderInstance>, AkamaiComputeError> {
         let response = self
             .http
             .get(format!("{}/linode/instances/{id}", self.base_url))
@@ -736,9 +748,7 @@ pub enum AkamaiComputeError {
     CreateConflict,
     #[error("compute instance disappeared after provider update")]
     MissingAfterUpdate,
-    #[error(
-        "Akamai VM for server instance {0} disappeared after writable data was prepared"
-    )]
+    #[error("Akamai VM for server instance {0} disappeared after writable data was prepared")]
     ProviderInstanceLost(crate::domain::ServerInstanceId),
     #[error("persisted Akamai provider id is invalid")]
     InvalidProviderId(#[source] std::num::ParseIntError),
@@ -798,7 +808,10 @@ mod tests {
     #[test]
     fn provider_label_is_valid_and_deterministic() {
         let id = Uuid::from_u128(1);
-        assert_eq!(provider_label(id), "mcserver-00000000-0000-0000-0000-000000000001");
+        assert_eq!(
+            provider_label(id),
+            "mcserver-00000000-0000-0000-0000-000000000001"
+        );
     }
 
     #[test]
@@ -835,7 +848,9 @@ mod tests {
 
         assert_eq!(instance.public_ipv4(), Some("203.0.113.10".to_owned()));
         assert_eq!(
-            instance.public_ipv4().and_then(|value| value.parse::<Ipv4Addr>().ok()),
+            instance
+                .public_ipv4()
+                .and_then(|value| value.parse::<Ipv4Addr>().ok()),
             Some(Ipv4Addr::new(203, 0, 113, 10))
         );
     }
@@ -851,18 +866,9 @@ mod tests {
                 "mcserver-scope-production".to_owned(),
             ],
         };
-        assert!(instance.is_owned_by(
-            "mcserver-owned",
-            "mcserver-scope-production"
-        ));
-        assert!(!instance.is_owned_by(
-            "mcserver-other",
-            "mcserver-scope-production"
-        ));
-        assert!(!instance.is_owned_by(
-            "mcserver-owned",
-            "mcserver-scope-staging"
-        ));
+        assert!(instance.is_owned_by("mcserver-owned", "mcserver-scope-production"));
+        assert!(!instance.is_owned_by("mcserver-other", "mcserver-scope-production"));
+        assert!(!instance.is_owned_by("mcserver-owned", "mcserver-scope-staging"));
     }
 
     #[test]

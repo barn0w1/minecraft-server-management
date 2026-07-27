@@ -164,7 +164,11 @@ impl ComputeInstance {
         created_at: UnixTimestampMillis,
         updated_at: UnixTimestampMillis,
     ) -> Result<Self, ComputeInstanceValidationError> {
-        validate_required("connection_token", &connection_token, MAX_CONNECTION_TOKEN_CHARS)?;
+        validate_required(
+            "connection_token",
+            &connection_token,
+            MAX_CONNECTION_TOKEN_CHARS,
+        )?;
         validate_optional(
             "enrollment_token",
             enrollment_token.as_deref(),
@@ -175,23 +179,23 @@ impl ComputeInstance {
             provider_instance_id.as_deref(),
             MAX_PROVIDER_INSTANCE_ID_CHARS,
         )?;
-        validate_optional(
-            "public_ipv4",
-            public_ipv4.as_deref(),
-            MAX_PUBLIC_IPV4_CHARS,
-        )?;
+        validate_optional("public_ipv4", public_ipv4.as_deref(), MAX_PUBLIC_IPV4_CHARS)?;
         match provider {
             ComputeProvider::LocalProcess => {
                 if provider_instance_id.is_some()
                     || public_ipv4.is_some()
                     || enrollment_token.is_some()
                 {
-                    return Err(ComputeInstanceValidationError::InvalidProviderFields(provider));
+                    return Err(ComputeInstanceValidationError::InvalidProviderFields(
+                        provider,
+                    ));
                 }
             }
             ComputeProvider::Akamai => {
                 if process_id.is_some() {
-                    return Err(ComputeInstanceValidationError::InvalidProviderFields(provider));
+                    return Err(ComputeInstanceValidationError::InvalidProviderFields(
+                        provider,
+                    ));
                 }
                 if let Some(address) = public_ipv4.as_deref() {
                     address.parse::<std::net::Ipv4Addr>().map_err(|_| {

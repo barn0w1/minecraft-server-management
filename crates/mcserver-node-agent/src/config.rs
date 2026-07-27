@@ -1,10 +1,4 @@
-use std::{
-    env, fmt,
-    net::SocketAddr,
-    os::unix::fs::MetadataExt,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{env, fmt, net::SocketAddr, os::unix::fs::MetadataExt, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use uuid::Uuid;
@@ -333,7 +327,9 @@ pub enum ConfigError {
     InvalidTlsServerName(String),
     #[error("compute instance id is invalid")]
     InvalidUuid(#[source] uuid::Error),
-    #[error("MCSERVER_NODE_AGENT_DATA_ACCESS_MODE must be auto, podman_user_namespace, or host: {0}")]
+    #[error(
+        "MCSERVER_NODE_AGENT_DATA_ACCESS_MODE must be auto, podman_user_namespace, or host: {0}"
+    )]
     InvalidDataAccessMode(String),
     #[error("cannot determine the node-agent effective user")]
     ProcessMetadata(#[source] std::io::Error),

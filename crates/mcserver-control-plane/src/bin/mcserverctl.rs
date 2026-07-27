@@ -238,9 +238,18 @@ impl CreateOptions {
                     accept_eula = true;
                     index += 1;
                 }
-                "--name" | "--repository" | "--compute" | "--akamai-region"
-                | "--akamai-type" | "--akamai-image" | "--akamai-firewall-id"
-                | "--image" | "--type" | "--version" | "--port" | "--stop-timeout"
+                "--name"
+                | "--repository"
+                | "--compute"
+                | "--akamai-region"
+                | "--akamai-type"
+                | "--akamai-image"
+                | "--akamai-firewall-id"
+                | "--image"
+                | "--type"
+                | "--version"
+                | "--port"
+                | "--stop-timeout"
                 | "--env" => {
                     let value = arguments
                         .get(index + 1)
@@ -312,8 +321,7 @@ impl CreateOptions {
             "local" => CreateCompute::Local,
             "akamai" => CreateCompute::Akamai {
                 region: akamai_region.ok_or(CliError::MissingRequiredFlag("--akamai-region"))?,
-                instance_type: akamai_type
-                    .ok_or(CliError::MissingRequiredFlag("--akamai-type"))?,
+                instance_type: akamai_type.ok_or(CliError::MissingRequiredFlag("--akamai-type"))?,
                 image: akamai_image.ok_or(CliError::MissingRequiredFlag("--akamai-image"))?,
                 firewall_id: akamai_firewall_id,
             },

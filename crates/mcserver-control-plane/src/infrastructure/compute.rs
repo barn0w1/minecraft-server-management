@@ -3,9 +3,7 @@ use uuid::Uuid;
 
 use crate::domain::{ComputeInstance, ComputeProvider, ServerInstance, UnixTimestampMillis};
 
-use super::{
-    AkamaiComputeError, AkamaiComputeManager, LocalComputeError, LocalComputeManager,
-};
+use super::{AkamaiComputeError, AkamaiComputeManager, LocalComputeError, LocalComputeManager};
 
 #[derive(Clone)]
 pub struct ComputeManager {
@@ -77,7 +75,6 @@ pub enum ComputeError {
     #[error("Akamai compute was requested but the provider is not configured")]
     AkamaiNotConfigured,
 }
-
 
 #[cfg(test)]
 mod tests {

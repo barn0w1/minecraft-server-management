@@ -260,7 +260,6 @@ pub enum BootstrapError {
     Serialization(#[from] serde_json::Error),
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::is_environment_key;

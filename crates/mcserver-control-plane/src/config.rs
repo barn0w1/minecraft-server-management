@@ -1,4 +1,9 @@
-use std::{env, fmt, net::{IpAddr, SocketAddr}, path::PathBuf, time::Duration};
+use std::{
+    env, fmt,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 use thiserror::Error;
 
@@ -220,12 +225,12 @@ fn remote_agent_config() -> Result<Option<RemoteAgentConfig>, ConfigError> {
         "MCSERVER_CONTROL_PLANE_NODE_AGENT_DOWNLOAD_URL",
         &node_agent_download_url,
     )?;
-    let node_agent_sha256 = required_non_blank(
-        "MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256",
-        SHA256_HEX_CHARS,
-    )?;
+    let node_agent_sha256 =
+        required_non_blank("MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256", SHA256_HEX_CHARS)?;
     if node_agent_sha256.len() != SHA256_HEX_CHARS
-        || !node_agent_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !node_agent_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(ConfigError::InvalidSha256(node_agent_sha256));
     }
@@ -281,14 +286,11 @@ fn akamai_config(
     if remote_agent.is_none() {
         return Err(ConfigError::RemoteAgentRequiredForAkamai);
     }
-    let api_base_url = optional_string(
-        "MCSERVER_AKAMAI_API_BASE_URL",
-        DEFAULT_AKAMAI_API_BASE_URL,
-    )?;
+    let api_base_url =
+        optional_string("MCSERVER_AKAMAI_API_BASE_URL", DEFAULT_AKAMAI_API_BASE_URL)?;
     validate_api_base_url(&api_base_url)?;
     let authorized_keys_file = required_path("MCSERVER_AKAMAI_AUTHORIZED_KEYS_FILE")?;
-    let node_agent_environment_file =
-        required_path("MCSERVER_AKAMAI_NODE_AGENT_ENVIRONMENT_FILE")?;
+    let node_agent_environment_file = required_path("MCSERVER_AKAMAI_NODE_AGENT_ENVIRONMENT_FILE")?;
     let scope = optional_scope("MCSERVER_AKAMAI_SCOPE", DEFAULT_AKAMAI_SCOPE)?;
     if scope.chars().count() > MAX_AKAMAI_SCOPE_CHARS {
         return Err(ConfigError::AkamaiScopeTooLong {
@@ -324,11 +326,7 @@ fn required_non_blank(name: &'static str, maximum: usize) -> Result<String, Conf
     Ok(value)
 }
 
-fn validate_non_blank(
-    name: &'static str,
-    value: &str,
-    maximum: usize,
-) -> Result<(), ConfigError> {
+fn validate_non_blank(name: &'static str, value: &str, maximum: usize) -> Result<(), ConfigError> {
     if value.trim().is_empty() {
         return Err(ConfigError::BlankValue(name));
     }
@@ -586,14 +584,15 @@ pub enum ConfigError {
     InvalidSha256(String),
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{validate_api_base_url, validate_https_url};
 
     #[test]
     fn remote_download_requires_structurally_valid_https() {
-        assert!(validate_https_url("TEST", "https://downloads.example.com/agent?version=1").is_ok());
+        assert!(
+            validate_https_url("TEST", "https://downloads.example.com/agent?version=1").is_ok()
+        );
         assert!(validate_https_url("TEST", "http://downloads.example.com/agent").is_err());
         assert!(validate_https_url("TEST", "https:///missing-host").is_err());
         assert!(validate_https_url("TEST", "https://user:secret@example.com/agent").is_err());

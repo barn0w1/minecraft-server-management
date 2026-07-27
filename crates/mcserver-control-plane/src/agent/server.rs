@@ -105,19 +105,20 @@ impl TlsAgentServer {
         let certificate = tokio::fs::read(certificate_path).await?;
         let private_key = tokio::fs::read(private_key_path).await?;
         let mut certificate_reader = std::io::BufReader::new(certificate.as_slice());
-        let certificates = rustls_pemfile::certs(&mut certificate_reader)
-            .collect::<Result<Vec<_>, _>>()?;
+        let certificates =
+            rustls_pemfile::certs(&mut certificate_reader).collect::<Result<Vec<_>, _>>()?;
         if certificates.is_empty() {
             return Err(AgentServerError::TlsConfiguration(
                 "TLS certificate file contains no certificates".to_owned(),
             ));
         }
         let mut private_key_reader = std::io::BufReader::new(private_key.as_slice());
-        let private_key = rustls_pemfile::private_key(&mut private_key_reader)?.ok_or_else(|| {
-            AgentServerError::TlsConfiguration(
-                "TLS private key file contains no supported private key".to_owned(),
-            )
-        })?;
+        let private_key =
+            rustls_pemfile::private_key(&mut private_key_reader)?.ok_or_else(|| {
+                AgentServerError::TlsConfiguration(
+                    "TLS private key file contains no supported private key".to_owned(),
+                )
+            })?;
         let server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificates, private_key)
@@ -239,7 +240,10 @@ async fn handle_connection(
             &mut writer,
             &Response::error(
                 Value::Null,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+                ErrorObject::new(
+                    json_rpc::error_code::INVALID_REQUEST,
+                    "Invalid registration",
+                ),
             ),
         )
         .await?;
@@ -257,7 +261,10 @@ async fn handle_connection(
             &mut writer,
             &Response::error(
                 response_id,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+                ErrorObject::new(
+                    json_rpc::error_code::INVALID_REQUEST,
+                    "Invalid registration",
+                ),
             ),
         )
         .await?;
@@ -353,7 +360,10 @@ async fn handle_connection(
 
     let session_id = Uuid::new_v4();
     let (sender, receiver) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-    context.registry.register(compute_id, session_id, sender).await;
+    context
+        .registry
+        .register(compute_id, session_id, sender)
+        .await;
     context
         .reconcile_scheduler
         .enqueue_best_effort_for_instance(compute.server_instance_id);
@@ -588,10 +598,7 @@ where
     write_value(writer, &serde_json::to_value(response)?).await
 }
 
-async fn write_command_request<W>(
-    writer: &mut W,
-    request: &Value,
-) -> Result<(), AgentCallError>
+async fn write_command_request<W>(writer: &mut W, request: &Value) -> Result<(), AgentCallError>
 where
     W: AsyncWrite + Unpin,
 {

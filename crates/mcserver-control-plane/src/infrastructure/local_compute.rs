@@ -214,11 +214,7 @@ impl LocalComputeManager {
         if !runtime_process_matches(&runtime_state).await? {
             return Ok(false);
         }
-        wait_for_untracked_process_exit(
-            &runtime_state,
-            self.process_stop_timeout,
-        )
-        .await?;
+        wait_for_untracked_process_exit(&runtime_state, self.process_stop_timeout).await?;
         info!(
             compute_instance_id = %compute_instance_id,
             process_id = runtime_state.process_id,
@@ -363,11 +359,8 @@ impl LocalComputeManager {
                     && runtime_state.compute_instance_id == compute.id.as_uuid()
                     && runtime_state.local_scope == self.local_scope
                 {
-                    wait_for_untracked_process_exit(
-                        &runtime_state,
-                        self.process_stop_timeout,
-                    )
-                    .await?;
+                    wait_for_untracked_process_exit(&runtime_state, self.process_stop_timeout)
+                        .await?;
                 }
             }
             (None, None) => {}
@@ -406,7 +399,8 @@ impl LocalComputeManager {
         let Some(process_id) = compute.process_id else {
             return Ok(false);
         };
-        let Some(runtime_state) = load_local_runtime_state(&self.state_directory(compute.id)).await?
+        let Some(runtime_state) =
+            load_local_runtime_state(&self.state_directory(compute.id)).await?
         else {
             return Ok(false);
         };
@@ -464,19 +458,14 @@ impl LocalComputeManager {
             terminate_spawned_child(&mut child, compute.id).await;
             return Err(LocalComputeError::MissingProcessId);
         };
-        let runtime_state = match capture_local_runtime_state(
-            process_id,
-            compute.id,
-            &self.local_scope,
-        )
-        .await
-        {
-            Ok(runtime_state) => runtime_state,
-            Err(error) => {
-                terminate_spawned_child(&mut child, compute.id).await;
-                return Err(error);
-            }
-        };
+        let runtime_state =
+            match capture_local_runtime_state(process_id, compute.id, &self.local_scope).await {
+                Ok(runtime_state) => runtime_state,
+                Err(error) => {
+                    terminate_spawned_child(&mut child, compute.id).await;
+                    return Err(error);
+                }
+            };
         if let Err(error) = store_local_runtime_state(&state_directory, &runtime_state).await {
             terminate_spawned_child(&mut child, compute.id).await;
             return Err(error);
@@ -678,7 +667,9 @@ async fn wait_for_untracked_process_exit(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err(LocalComputeError::ProcessDidNotExit(runtime_state.process_id))
+    Err(LocalComputeError::ProcessDidNotExit(
+        runtime_state.process_id,
+    ))
 }
 
 async fn send_signal(process_id: u32, signal: &str) -> Result<(), LocalComputeError> {
@@ -757,7 +748,7 @@ pub enum LocalComputeError {
 mod tests {
     use std::time::Duration;
 
-    use super::{node_operation_timeout, parse_linux_process_stat, LinuxProcessState};
+    use super::{LinuxProcessState, node_operation_timeout, parse_linux_process_stat};
 
     #[test]
     fn node_operation_timeout_leaves_response_budget() {
@@ -773,7 +764,8 @@ mod tests {
 
     #[test]
     fn parses_linux_process_stat_with_spaces_and_parentheses_in_name() {
-        let stat = "42 (node agent (test)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
+        let stat =
+            "42 (node agent (test)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
         assert_eq!(
             parse_linux_process_stat(stat),
             Some(LinuxProcessState {

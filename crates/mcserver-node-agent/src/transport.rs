@@ -146,7 +146,9 @@ async fn load_connection_token(config: &Config) -> Result<String, TransportError
     let path = connection_token_path(config);
     match tokio::fs::read_to_string(&path).await {
         Ok(token) => {
-            let token = token.trim_end_matches(|character| matches!(character, '\r' | '\n')).to_owned();
+            let token = token
+                .trim_end_matches(|character| matches!(character, '\r' | '\n'))
+                .to_owned();
             validate_connection_token(&token)?;
             Ok(token)
         }
@@ -154,14 +156,14 @@ async fn load_connection_token(config: &Config) -> Result<String, TransportError
             validate_connection_token(&config.connection_token)?;
             Ok(config.connection_token.clone())
         }
-        Err(error) => Err(TransportError::CredentialIo { path, source: error }),
+        Err(error) => Err(TransportError::CredentialIo {
+            path,
+            source: error,
+        }),
     }
 }
 
-async fn persist_connection_token(
-    config: &Config,
-    token: &str,
-) -> Result<(), TransportError> {
+async fn persist_connection_token(config: &Config, token: &str) -> Result<(), TransportError> {
     validate_connection_token(token)?;
     tokio::fs::create_dir_all(&config.state_directory)
         .await
@@ -192,12 +194,13 @@ async fn persist_connection_token(
             path: temporary.clone(),
             source,
         })?;
-    let file = tokio::fs::File::open(&temporary)
-        .await
-        .map_err(|source| TransportError::CredentialIo {
-            path: temporary.clone(),
-            source,
-        })?;
+    let file =
+        tokio::fs::File::open(&temporary)
+            .await
+            .map_err(|source| TransportError::CredentialIo {
+                path: temporary.clone(),
+                source,
+            })?;
     file.sync_all()
         .await
         .map_err(|source| TransportError::CredentialIo {
@@ -254,8 +257,7 @@ async fn connect(config: &Config) -> Result<BoxedTransport, TransportError> {
 
     let ca_pem = tokio::fs::read(&tls.ca_certificate).await?;
     let mut reader = std::io::BufReader::new(ca_pem.as_slice());
-    let certificates = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let certificates = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
     if certificates.is_empty() {
         return Err(TransportError::TlsConfiguration(
             "CA certificate file contains no certificates".to_owned(),

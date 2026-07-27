@@ -88,8 +88,7 @@ impl AgentExecutor {
                     .await?;
             }
             None => {
-                self.remove_paths([self.data_directory()])
-                    .await?;
+                self.remove_paths([self.data_directory()]).await?;
                 fs::create_dir_all(self.data_directory()).await?;
             }
         }
@@ -331,10 +330,7 @@ impl AgentExecutor {
         if path_exists(&data).await? {
             self.move_path(&data, &previous).await?;
         }
-        if let Err(error) = self
-            .move_path(&restored_data, &data)
-            .await
-        {
+        if let Err(error) = self.move_path(&restored_data, &data).await {
             if path_exists(&previous).await.unwrap_or(false)
                 && !path_exists(&data).await.unwrap_or(true)
             {
@@ -342,8 +338,7 @@ impl AgentExecutor {
             }
             return Err(error);
         }
-        self.remove_paths([previous, staging])
-            .await?;
+        self.remove_paths([previous, staging]).await?;
         Ok(())
     }
 
@@ -525,10 +520,7 @@ impl AgentExecutor {
         self.run_command_allow_failure(command, description).await
     }
 
-    async fn remove_paths<const N: usize>(
-        &self,
-        paths: [PathBuf; N],
-    ) -> Result<(), ExecutorError> {
+    async fn remove_paths<const N: usize>(&self, paths: [PathBuf; N]) -> Result<(), ExecutorError> {
         match self.config.data_access_mode {
             DataAccessMode::PodmanUserNamespace => {
                 let mut command = Command::new(&self.config.podman_binary);
@@ -545,11 +537,7 @@ impl AgentExecutor {
         Ok(())
     }
 
-    async fn move_path(
-        &self,
-        source: &Path,
-        destination: &Path,
-    ) -> Result<(), ExecutorError> {
+    async fn move_path(&self, source: &Path, destination: &Path) -> Result<(), ExecutorError> {
         match self.config.data_access_mode {
             DataAccessMode::PodmanUserNamespace => {
                 let mut command = Command::new(&self.config.podman_binary);
