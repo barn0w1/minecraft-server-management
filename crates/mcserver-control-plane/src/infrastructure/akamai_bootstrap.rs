@@ -181,7 +181,7 @@ LockPersonality=true
 Delegate=yes
 TasksMax=infinity
 KillMode=mixed
-ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers
+ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers /run/lock
 
 [Install]
 WantedBy=multi-user.target
@@ -214,6 +214,9 @@ mod tests {
         assert!(!unit.contains("RestrictSUIDSGID=true\n"));
         assert!(unit.contains("ProtectKernelTunables=false\n"));
         assert!(!unit.contains("ProtectKernelTunables=true\n"));
+        assert!(unit.contains(
+            "ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers /run/lock\n"
+        ));
     }
 }
 
