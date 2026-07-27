@@ -172,7 +172,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ProtectKernelTunables=true
+# Rootful Podman networking needs to configure namespace-scoped sysctls.
+ProtectKernelTunables=false
 ProtectKernelModules=true
 # Rootful Podman needs to restore setuid/setgid mode bits while unpacking images.
 RestrictSUIDSGID=false
@@ -206,11 +207,13 @@ mod tests {
     use super::systemd_unit;
 
     #[test]
-    fn node_agent_unit_allows_rootful_podman_to_unpack_setid_files() {
+    fn node_agent_unit_allows_required_rootful_podman_operations() {
         let unit = systemd_unit();
 
         assert!(unit.contains("RestrictSUIDSGID=false\n"));
         assert!(!unit.contains("RestrictSUIDSGID=true\n"));
+        assert!(unit.contains("ProtectKernelTunables=false\n"));
+        assert!(!unit.contains("ProtectKernelTunables=true\n"));
     }
 }
 
