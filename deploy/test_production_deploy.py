@@ -105,6 +105,17 @@ class ProductionDeployTest(unittest.TestCase):
             "mcserver-node-agent-v0.1.0-x86_64-unknown-linux-musl", enabled
         )
 
+    def test_ping_response_accepts_successful_json(self) -> None:
+        self.assertTrue(
+            deploy.ping_response_is_ok(
+                '{\n  "status": "ok",\n  "version": "0.1.0"\n}'
+            )
+        )
+        self.assertFalse(
+            deploy.ping_response_is_ok('{"status":"error","version":"0.1.0"}')
+        )
+        self.assertFalse(deploy.ping_response_is_ok("status=ok version=0.1.0"))
+
     def test_long_lived_r2_keys_are_rejected(self) -> None:
         runtime = self.root / "r2-runtime.env"
         runtime.write_text(

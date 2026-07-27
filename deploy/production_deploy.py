@@ -743,6 +743,14 @@ def verify_almalinux() -> None:
         raise DeployError("production deploy requires AlmaLinux 10")
 
 
+def ping_response_is_ok(output: str) -> bool:
+    try:
+        response = json.loads(output)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(response, dict) and response.get("status") == "ok"
+
+
 def wait_for_ping(timeout_seconds: float = 45) -> str:
     deadline = time.monotonic() + timeout_seconds
     last_output = ""
@@ -760,7 +768,7 @@ def wait_for_ping(timeout_seconds: float = 45) -> str:
             check=False,
         )
         last_output = result.stdout.strip()
-        if result.returncode == 0 and "status=ok" in last_output:
+        if result.returncode == 0 and ping_response_is_ok(last_output):
             return last_output
         time.sleep(1)
     raise DeployError(f"control-plane ping did not succeed: {last_output}")
