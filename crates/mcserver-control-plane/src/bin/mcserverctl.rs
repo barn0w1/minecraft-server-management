@@ -44,6 +44,7 @@ async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliE
         Command::ServerStart { server_id } => set_desired_state(client, server_id, "running").await,
         Command::ServerStop { server_id } => set_desired_state(client, server_id, "stopped").await,
         Command::ServerCreate(options) => {
+            let options = *options;
             let compute = match options.compute {
                 CreateCompute::Local => json!({ "provider": "local" }),
                 CreateCompute::Akamai {
@@ -160,7 +161,7 @@ enum Command {
     ServerInstances { server_id: Uuid },
     ServerStart { server_id: Uuid },
     ServerStop { server_id: Uuid },
-    ServerCreate(CreateOptions),
+    ServerCreate(Box<CreateOptions>),
 }
 
 fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -185,7 +186,7 @@ fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
             }
         }
         [resource, action, rest @ ..] if resource == "server" && action == "create" => {
-            Ok(Command::ServerCreate(CreateOptions::parse(rest)?))
+            Ok(Command::ServerCreate(Box::new(CreateOptions::parse(rest)?)))
         }
         _ => Err(CliError::Usage),
     }
