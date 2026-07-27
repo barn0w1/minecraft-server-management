@@ -445,8 +445,11 @@ impl ReconcileWorker {
             return Ok(StepOutcome::Stable);
         };
 
-        if !self.agents.is_connected(compute.id).await
-            && (instance.data_prepared_at.is_none() || instance.result_snapshot_id.is_some())
+        let data_is_safe_to_discard =
+            instance.data_prepared_at.is_none() || instance.result_snapshot_id.is_some();
+        if data_is_safe_to_discard
+            && (compute.shutdown_requested_at.is_some()
+                || !self.agents.is_connected(compute.id).await)
         {
             if self.compute_manager.delete(&compute).await? {
                 return Ok(StepOutcome::Changed);
