@@ -1,0 +1,25 @@
+schema_version = 1
+name = "community"
+
+[compute]
+provider = "akamai"
+region = "jp-tyo-3"
+instance_type = "g6-nanode-1"
+image = "linode/debian13"
+firewall_id = 0 # REPLACE_WITH_ALLOWED_FIREWALL_ID
+
+[process]
+container_image = "docker.io/itzg/minecraft-server:latest"
+server_type = "VANILLA"
+version = "LATEST"
+host_port = 25565
+stop_timeout_seconds = 120
+accept_eula = true
+
+[process.environment]
+MEMORY = "768M"
+MOTD = "Community Minecraft Server"
+ENABLE_WHITELIST = "TRUE"
+
+[data]
+backend = "r2_restic"

@@ -92,19 +92,16 @@ def ensure_restic_repository(repository: Path, restic_binary: str) -> None:
     restic = shutil.which(restic_binary)
     if restic is None:
         raise RpcError(f"restic binary is not available: {restic_binary}")
-    if not any(
-        os.environ.get(name)
-        for name in ("RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
-    ):
-        raise RpcError(
-            "set RESTIC_PASSWORD, RESTIC_PASSWORD_FILE, or RESTIC_PASSWORD_COMMAND "
-            "before running E2E"
-        )
-
-    command = [restic, "--repo", str(repository)]
     if repository.exists():
         result = subprocess.run(
-            [*command, "cat", "config"],
+            [
+                restic,
+                "--insecure-no-password",
+                "--repo",
+                str(repository),
+                "cat",
+                "config",
+            ],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -113,21 +110,12 @@ def ensure_restic_repository(repository: Path, restic_binary: str) -> None:
         if result.returncode != 0:
             raise RpcError(
                 "the requested repository path already exists but is not an accessible "
-                f"restic repository: {result.stderr.strip()}"
+                f"passwordless restic repository: {result.stderr.strip()}"
             )
         return
 
     repository.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [*command, "init"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RpcError(f"restic repository initialization failed: {result.stderr.strip()}")
-    print(f"initialized restic repository={repository}")
+    print(f"repository will be initialized automatically={repository}")
 
 
 def wait_until(
@@ -478,7 +466,10 @@ def main() -> int:
                         "accept_eula": True,
                         "environment": {},
                     },
-                    "data": {"repository": str(repository)},
+                    "data": {
+                        "backend": "local_restic",
+                        "repository": str(repository),
+                    },
                 },
             },
         )

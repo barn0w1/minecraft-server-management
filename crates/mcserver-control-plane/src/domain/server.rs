@@ -179,8 +179,30 @@ pub struct ProcessSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum DesiredDataSpec {
+    LocalRestic { repository: String },
+    R2Restic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataBackend {
+    LocalRestic,
+    R2Restic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataSpec {
+    pub backend: DataBackend,
     pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesiredServerSpec {
+    pub compute: ComputeSpec,
+    pub process: ProcessSpec,
+    pub data: DesiredDataSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +276,48 @@ impl ServerSpec {
         }
 
         Ok(())
+    }
+}
+
+impl DesiredServerSpec {
+    pub fn resolve(
+        self,
+        existing_data: Option<&DataSpec>,
+        r2_repository: Option<String>,
+    ) -> Result<ServerSpec, ValidationError> {
+        let data = match self.data {
+            DesiredDataSpec::LocalRestic { repository } => match existing_data {
+                Some(data) if data.backend != DataBackend::LocalRestic => {
+                    return Err(ValidationError::DataBackendImmutable);
+                }
+                Some(data) if data.repository != repository => {
+                    return Err(ValidationError::DataRepositoryImmutable);
+                }
+                Some(data) => data.clone(),
+                None => DataSpec {
+                    backend: DataBackend::LocalRestic,
+                    repository,
+                },
+            },
+            DesiredDataSpec::R2Restic => {
+                let repository = match existing_data {
+                    Some(data) if data.backend == DataBackend::R2Restic => data.repository.clone(),
+                    Some(_) => return Err(ValidationError::DataBackendImmutable),
+                    None => r2_repository.ok_or(ValidationError::R2Unavailable)?,
+                };
+                DataSpec {
+                    backend: DataBackend::R2Restic,
+                    repository,
+                }
+            }
+        };
+        let spec = ServerSpec {
+            compute: self.compute,
+            process: self.process,
+            data,
+        };
+        spec.validate()?;
+        Ok(spec)
     }
 }
 
@@ -343,6 +407,27 @@ impl Server {
         self.updated_at = std::cmp::max(self.updated_at, now);
         Ok(true)
     }
+
+    pub fn update_spec(
+        &mut self,
+        spec: ServerSpec,
+        now: UnixTimestampMillis,
+    ) -> Result<bool, ValidationError> {
+        spec.validate()?;
+        if self.spec == spec {
+            return Ok(false);
+        }
+        if self.desired_state != DesiredState::Stopped {
+            return Err(ValidationError::ServerMustBeStopped);
+        }
+        self.spec = spec;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ValidationError::GenerationOverflow)?;
+        self.updated_at = std::cmp::max(self.updated_at, now);
+        Ok(true)
+    }
 }
 
 fn require_non_blank(field: &'static str, value: &str) -> Result<(), ValidationError> {
@@ -403,6 +488,14 @@ pub enum ValidationError {
     ZeroGeneration,
     #[error("server generation overflowed")]
     GenerationOverflow,
+    #[error("server specification can only be changed while stopped")]
+    ServerMustBeStopped,
+    #[error("server data backend cannot be changed")]
+    DataBackendImmutable,
+    #[error("server data repository cannot be changed")]
+    DataRepositoryImmutable,
+    #[error("R2 storage is not configured")]
+    R2Unavailable,
     #[error("server timestamps are not in chronological order")]
     InvalidTimestampOrder,
     #[error("invalid persisted value for {field}: {value}")]
@@ -428,6 +521,7 @@ mod tests {
                 environment: BTreeMap::new(),
             },
             data: DataSpec {
+                backend: DataBackend::LocalRestic,
                 repository: "/tmp/mcserver-restic".to_owned(),
             },
         }
@@ -460,6 +554,92 @@ mod tests {
 
         assert!(!server.set_desired_state(DesiredState::Stopped, now)?);
         assert_eq!(server.generation, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_new_r2_repository_and_preserves_it_on_update()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let desired = DesiredServerSpec {
+            compute: ComputeSpec::Local,
+            process: valid_spec().process,
+            data: DesiredDataSpec::R2Restic,
+        };
+        let repository = "s3:https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/mcserver/servers/id/restic";
+        let created = desired.clone().resolve(None, Some(repository.to_owned()))?;
+        let updated = desired.resolve(Some(&created.data), None)?;
+
+        assert_eq!(created.data.backend, DataBackend::R2Restic);
+        assert_eq!(created.data.repository, repository);
+        assert_eq!(updated.data, created.data);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_data_backend_changes() {
+        let desired = DesiredServerSpec {
+            compute: ComputeSpec::Local,
+            process: valid_spec().process,
+            data: DesiredDataSpec::R2Restic,
+        };
+
+        assert!(matches!(
+            desired.resolve(Some(&valid_spec().data), None),
+            Err(ValidationError::DataBackendImmutable)
+        ));
+    }
+
+    #[test]
+    fn rejects_local_repository_changes() {
+        let existing = valid_spec().data;
+        let desired = DesiredServerSpec {
+            compute: ComputeSpec::Local,
+            process: valid_spec().process,
+            data: DesiredDataSpec::LocalRestic {
+                repository: "/tmp/other-restic".to_owned(),
+            },
+        };
+
+        assert!(matches!(
+            desired.resolve(Some(&existing), None),
+            Err(ValidationError::DataRepositoryImmutable)
+        ));
+    }
+
+    #[test]
+    fn specification_changes_require_a_stopped_server() -> Result<(), Box<dyn std::error::Error>> {
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let mut server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            now,
+        )?;
+        server.set_desired_state(DesiredState::Running, now)?;
+        let mut changed = valid_spec();
+        changed.process.version = "1.21.8".to_owned();
+
+        assert!(matches!(
+            server.update_spec(changed, now),
+            Err(ValidationError::ServerMustBeStopped)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn identical_specification_is_idempotent_while_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let mut server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            now,
+        )?;
+        server.set_desired_state(DesiredState::Running, now)?;
+
+        assert!(!server.update_spec(valid_spec(), now)?);
+        assert_eq!(server.generation, 2);
         Ok(())
     }
 

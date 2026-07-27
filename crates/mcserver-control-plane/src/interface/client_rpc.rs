@@ -1,9 +1,9 @@
 use mcserver_protocol::{
     client::{
-        self, ComputeInstanceResource, CreateServerParams, GetServerInstanceParams,
-        GetServerParams, ListServerInstancesParams, ListServerInstancesResult, ListServersResult,
-        PingResult, ServerInstanceResource, ServerResource, ServerStatusResource,
-        SetServerDesiredStateParams,
+        self, ApplyServerParams, ComputeInstanceResource, CreateServerParams,
+        GetServerInstanceParams, GetServerParams, ListServerInstancesParams,
+        ListServerInstancesResult, ListServersResult, PingResult, ServerInstanceResource,
+        ServerResource, ServerStatusResource, SetServerDesiredStateParams,
     },
     json_rpc::{self, ErrorObject, Request, Response},
 };
@@ -16,8 +16,9 @@ use crate::{
         ApplicationError, ServerInstanceService, ServerService, ServerStatus, ServerStatusService,
     },
     domain::{
-        ComputeInstance, ComputeSpec, ComputeTerminalResult, DataSpec, DesiredState, ProcessSpec,
-        Server, ServerId, ServerInstance, ServerInstanceId, ServerSpec, TerminalResult,
+        ComputeInstance, ComputeSpec, ComputeTerminalResult, DataBackend, DesiredDataSpec,
+        DesiredServerSpec, DesiredState, ProcessSpec, Server, ServerId, ServerInstance,
+        ServerInstanceId, ServerSpec, TerminalResult,
     },
 };
 
@@ -141,7 +142,19 @@ impl ClientRpcHandler {
                 let params = parse_params::<CreateServerParams>(params)?;
                 let server = self
                     .server_service
-                    .create(params.name, domain_spec(params.spec))
+                    .create(params.name, domain_desired_spec(params.spec))
+                    .await?;
+                to_value(protocol_server(server))
+            }
+            client::method::SERVER_APPLY => {
+                let params = parse_params::<ApplyServerParams>(params)?;
+                let server = self
+                    .server_service
+                    .apply(
+                        params.name,
+                        domain_desired_spec(params.spec),
+                        params.expected_generation,
+                    )
                     .await?;
                 to_value(protocol_server(server))
             }
@@ -245,8 +258,8 @@ fn response_value(response: Response) -> Value {
     }
 }
 
-fn domain_spec(spec: client::ServerSpec) -> ServerSpec {
-    ServerSpec {
+fn domain_desired_spec(spec: client::DesiredServerSpec) -> DesiredServerSpec {
+    DesiredServerSpec {
         compute: match spec.compute {
             client::ComputeSpec::Local => ComputeSpec::Local,
             client::ComputeSpec::Akamai {
@@ -270,8 +283,11 @@ fn domain_spec(spec: client::ServerSpec) -> ServerSpec {
             accept_eula: spec.process.accept_eula,
             environment: spec.process.environment,
         },
-        data: DataSpec {
-            repository: spec.data.repository,
+        data: match spec.data {
+            client::DesiredDataSpec::LocalRestic { repository } => {
+                DesiredDataSpec::LocalRestic { repository }
+            }
+            client::DesiredDataSpec::R2Restic => DesiredDataSpec::R2Restic,
         },
     }
 }
@@ -302,6 +318,10 @@ fn protocol_spec(spec: ServerSpec) -> client::ServerSpec {
             environment: spec.process.environment,
         },
         data: client::DataSpec {
+            backend: match spec.data.backend {
+                DataBackend::LocalRestic => client::DataBackend::LocalRestic,
+                DataBackend::R2Restic => client::DataBackend::R2Restic,
+            },
             repository: spec.data.repository,
         },
     }

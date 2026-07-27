@@ -42,14 +42,15 @@ jobs:
           set -euo pipefail
           python3 -m py_compile scripts/*.py scripts/fakes/*.py deploy/*.py
           python3 -m unittest discover -s deploy -p 'test_*.py'
-          bash -n deploy/*.sh
+          bash -n deploy/*.sh scripts/*.sh
           test_directory=$(mktemp -d)
           trap 'rm -rf "${test_directory}"' EXIT
           sed 's#/usr/local/bin/mcserver-control-plane#/usr/bin/true#g' \
             deploy/systemd/mcserver-control-plane.service \
             > "${test_directory}/mcserver-control-plane.service"
           systemd-analyze verify "${test_directory}/mcserver-control-plane.service"
-          systemd-sysusers --dry-run deploy/systemd/mcserver-control-plane.sysusers.conf
+          systemd-sysusers --dry-run \
+            "${PWD}/deploy/systemd/mcserver-control-plane.sysusers.conf"
 
       - name: Build integration binaries
         run: cargo build --locked --workspace

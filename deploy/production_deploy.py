@@ -37,6 +37,12 @@ HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 ACCOUNT_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 RELEASE_VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 SAFE_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PROVIDER_IDENTIFIER = re.compile(r"^[A-Za-z0-9._/-]+$")
+PEM_CERTIFICATE = re.compile(
+    rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    re.DOTALL,
+)
+MAX_PKI_INPUT_BYTES = 1024 * 1024
 
 
 class DeployError(RuntimeError):
@@ -202,6 +208,42 @@ def require_positive_int(table: dict[str, Any], key: str, table_name: str) -> in
     return value
 
 
+def require_string_list(
+    table: dict[str, Any], key: str, table_name: str
+) -> list[str]:
+    value = table.get(key)
+    if not isinstance(value, list) or not value:
+        raise DeployError(f"{table_name}.{key} must be a non-empty string array")
+    result: list[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or item != item.strip()
+            or not PROVIDER_IDENTIFIER.fullmatch(item)
+        ):
+            raise DeployError(f"{table_name}.{key} contains an invalid value")
+        result.append(item)
+    if len(set(result)) != len(result):
+        raise DeployError(f"{table_name}.{key} contains a duplicate value")
+    return result
+
+
+def require_positive_int_list(
+    table: dict[str, Any], key: str, table_name: str
+) -> list[int]:
+    value = table.get(key)
+    if not isinstance(value, list) or not value:
+        raise DeployError(f"{table_name}.{key} must be a non-empty integer array")
+    if any(
+        not isinstance(item, int) or isinstance(item, bool) or item <= 0
+        for item in value
+    ):
+        raise DeployError(f"{table_name}.{key} contains an invalid value")
+    if len(set(value)) != len(value):
+        raise DeployError(f"{table_name}.{key} contains a duplicate value")
+    return value
+
+
 def require_positive_number(
     table: dict[str, Any], key: str, table_name: str
 ) -> float:
@@ -254,17 +296,23 @@ def load_config(path: Path) -> Config:
     )
     reject_unknown_keys(
         service,
-        {"public_address", "server_name", "trust_domain", "rust_log"},
+        {
+            "public_address",
+            "server_name",
+            "trust_domain",
+            "rust_log",
+            "certbot_lineage",
+        },
         "service",
     )
     reject_unknown_keys(
         akamai,
         {
             "scope",
-            "region",
-            "image",
-            "instance_type",
-            "firewall_id",
+            "allowed_regions",
+            "allowed_images",
+            "allowed_instance_types",
+            "allowed_firewall_ids",
             "max_active_instances",
             "max_instance_lifetime_seconds",
         },
@@ -297,7 +345,14 @@ def load_config(path: Path) -> Config:
     )
     reject_unknown_keys(
         acceptance,
-        {"repository", "host_port", "timeout_seconds"},
+        {
+            "region",
+            "image",
+            "instance_type",
+            "firewall_id",
+            "host_port",
+            "timeout_seconds",
+        },
         "acceptance",
     )
 
@@ -398,14 +453,27 @@ def validate_config(config: Config) -> None:
     if public_address != f"{server_name}:443":
         raise DeployError("service.public_address must exactly equal service.server_name:443")
     require_string(config.service, "trust_domain", "service")
+    certbot_lineage = Path(
+        require_string(config.service, "certbot_lineage", "service")
+    )
+    if not certbot_lineage.is_absolute():
+        raise DeployError("service.certbot_lineage must be an absolute path")
     if "rust_log" in config.service:
         require_string(config.service, "rust_log", "service")
 
     require_string(config.akamai, "scope", "akamai")
-    require_string(config.akamai, "region", "akamai")
-    require_string(config.akamai, "image", "akamai")
-    require_string(config.akamai, "instance_type", "akamai")
-    require_positive_int(config.akamai, "firewall_id", "akamai")
+    allowed_regions = require_string_list(
+        config.akamai, "allowed_regions", "akamai"
+    )
+    allowed_images = require_string_list(
+        config.akamai, "allowed_images", "akamai"
+    )
+    allowed_instance_types = require_string_list(
+        config.akamai, "allowed_instance_types", "akamai"
+    )
+    allowed_firewall_ids = require_positive_int_list(
+        config.akamai, "allowed_firewall_ids", "akamai"
+    )
     if require_positive_int(config.akamai, "max_active_instances", "akamai") != 1:
         raise DeployError("akamai.max_active_instances must be 1 for initial production")
     maximum_lifetime = require_positive_int(
@@ -448,26 +516,33 @@ def validate_config(config: Config) -> None:
             raise DeployError(f"files.{name} is missing or empty: {path}")
 
     runtime = parse_environment_file(config.files["r2_runtime_environment"])
-    if set(runtime) != {"RESTIC_PASSWORD", "AWS_DEFAULT_REGION"}:
+    if set(runtime) != {"AWS_DEFAULT_REGION"}:
         raise DeployError(
-            "R2 runtime environment must contain exactly RESTIC_PASSWORD and "
-            "AWS_DEFAULT_REGION"
+            "R2 runtime environment must contain exactly AWS_DEFAULT_REGION"
         )
     if runtime["AWS_DEFAULT_REGION"] != "auto":
         raise DeployError("AWS_DEFAULT_REGION must be auto for Cloudflare R2")
-    if "REPLACE_" in runtime["RESTIC_PASSWORD"]:
-        raise DeployError("R2 runtime environment still contains a placeholder")
-
-    repository = require_string(
-        config.acceptance, "repository", "acceptance"
+    acceptance_region = require_string(
+        config.acceptance, "region", "acceptance"
     )
-    prefix = (
-        f"s3:https://{account_id}.r2.cloudflarestorage.com/{bucket}/"
+    acceptance_image = require_string(config.acceptance, "image", "acceptance")
+    acceptance_type = require_string(
+        config.acceptance, "instance_type", "acceptance"
     )
-    if not repository.startswith(prefix) or repository == prefix:
+    acceptance_firewall = require_positive_int(
+        config.acceptance, "firewall_id", "acceptance"
+    )
+    if acceptance_region not in allowed_regions:
+        raise DeployError("acceptance.region is not in akamai.allowed_regions")
+    if acceptance_image not in allowed_images:
+        raise DeployError("acceptance.image is not in akamai.allowed_images")
+    if acceptance_type not in allowed_instance_types:
         raise DeployError(
-            "acceptance.repository must use the configured R2 account and bucket "
-            "with a non-empty prefix"
+            "acceptance.instance_type is not in akamai.allowed_instance_types"
+        )
+    if acceptance_firewall not in allowed_firewall_ids:
+        raise DeployError(
+            "acceptance.firewall_id is not in akamai.allowed_firewall_ids"
         )
     host_port = require_positive_int(config.acceptance, "host_port", "acceptance")
     if host_port > 65535:
@@ -638,10 +713,14 @@ def render_environment(config: Config, node_digest: str, live: bool) -> str:
         "MCSERVER_AKAMAI_REQUEST_TIMEOUT_SECONDS": "30",
         "MCSERVER_AKAMAI_REAP_ORPHANS_ON_START": "false",
         "MCSERVER_AKAMAI_LIVE_ENABLED": str(live).lower(),
-        "MCSERVER_AKAMAI_REGION": akamai["region"],
-        "MCSERVER_AKAMAI_IMAGE": akamai["image"],
-        "MCSERVER_AKAMAI_FIREWALL_ID": str(akamai["firewall_id"]),
-        "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES": akamai["instance_type"],
+        "MCSERVER_AKAMAI_ALLOWED_REGIONS": ",".join(akamai["allowed_regions"]),
+        "MCSERVER_AKAMAI_ALLOWED_IMAGES": ",".join(akamai["allowed_images"]),
+        "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES": ",".join(
+            akamai["allowed_instance_types"]
+        ),
+        "MCSERVER_AKAMAI_ALLOWED_FIREWALL_IDS": ",".join(
+            str(value) for value in akamai["allowed_firewall_ids"]
+        ),
         "MCSERVER_AKAMAI_MAX_ACTIVE_INSTANCES": str(
             akamai["max_active_instances"]
         ),
@@ -680,6 +759,66 @@ def install_file(source: Path, destination: str, mode: str, group: str) -> None:
     )
 
 
+def extract_server_trust_anchor(
+    fullchain: Path, ca_bundle: Path, destination: Path
+) -> None:
+    fullchain_bytes = fullchain.read_bytes()
+    ca_bundle_bytes = ca_bundle.read_bytes()
+    if (
+        not fullchain_bytes
+        or len(fullchain_bytes) > MAX_PKI_INPUT_BYTES
+        or not ca_bundle_bytes
+        or len(ca_bundle_bytes) > MAX_PKI_INPUT_BYTES
+    ):
+        raise DeployError("TLS certificate input is empty or exceeds one MiB")
+    chain = PEM_CERTIFICATE.findall(fullchain_bytes)
+    candidates = PEM_CERTIFICATE.findall(ca_bundle_bytes)
+    if not chain or not candidates:
+        raise DeployError("TLS certificate input contains no PEM certificate")
+
+    with tempfile.TemporaryDirectory(prefix="mcserver-trust-") as raw_work:
+        work = Path(raw_work)
+        leaf = work / "leaf.pem"
+        leaf.write_bytes(chain[0] + b"\n")
+        intermediates = work / "intermediates.pem"
+        if len(chain) > 1:
+            intermediates.write_bytes(
+                b"".join(certificate + b"\n" for certificate in chain[1:])
+            )
+        candidate_path = work / "candidate.pem"
+        selected: bytes | None = None
+        for candidate in candidates:
+            candidate_path.write_bytes(candidate + b"\n")
+            command = [
+                "/usr/bin/openssl",
+                "verify",
+                "-purpose",
+                "sslserver",
+                "-CAfile",
+                str(candidate_path),
+            ]
+            if intermediates.is_file():
+                command.extend(["-untrusted", str(intermediates)])
+            command.append(str(leaf))
+            result = subprocess.run(
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                selected = candidate + b"\n"
+                break
+        if selected is None:
+            raise DeployError(
+                "no certificate in files.remote_tls_root_ca validates "
+                "files.remote_tls_fullchain"
+            )
+        destination.write_bytes(selected)
+        destination.chmod(0o644)
+
+
 def install_configuration(config: Config, environment: str) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="mcserver-env-", delete=False
@@ -711,24 +850,54 @@ def install_configuration(config: Config, environment: str) -> None:
             "0600",
             "root",
         )
-    public_destinations = {
-        "remote_tls_fullchain": "remote-tls-fullchain.pem",
-        "remote_tls_root_ca": "remote-tls-root-ca.pem",
-        "agent_client_ca_certificate": "agent-client-ca.pem",
-    }
-    for source_name, destination_name in public_destinations.items():
+    install_file(
+        config.files["remote_tls_fullchain"],
+        "/etc/mcserver/pki/remote-tls-fullchain.pem",
+        "0644",
+        "mcserver",
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix="mcserver-trust-anchor-", delete=False
+    ) as temporary:
+        trust_anchor = Path(temporary.name)
+    try:
+        extract_server_trust_anchor(
+            config.files["remote_tls_fullchain"],
+            config.files["remote_tls_root_ca"],
+            trust_anchor,
+        )
         install_file(
-            config.files[source_name],
-            f"/etc/mcserver/pki/{destination_name}",
+            trust_anchor,
+            "/etc/mcserver/pki/remote-tls-root-ca.pem",
             "0644",
             "mcserver",
         )
+    finally:
+        trust_anchor.unlink(missing_ok=True)
+    install_file(
+        config.files["agent_client_ca_certificate"],
+        "/etc/mcserver/pki/agent-client-ca.pem",
+        "0644",
+        "mcserver",
+    )
     install_file(
         config.files["authorized_keys"],
         "/etc/mcserver/authorized_keys",
         "0640",
         "mcserver",
     )
+
+
+def existing_live_creation_enabled(
+    path: Path = Path("/etc/mcserver/control-plane.env"),
+) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        values = parse_environment_file(path)
+    except (OSError, UnicodeError, DeployError):
+        return False
+    return values.get("MCSERVER_AKAMAI_LIVE_ENABLED") == "true"
 
 
 def verify_almalinux() -> None:
@@ -808,6 +977,7 @@ def deploy(
         raise DeployError("deploy must run as root")
     verify_almalinux()
     report.record("host operating system", "AlmaLinux 10")
+    restore_live_after_upgrade = existing_live_creation_enabled()
 
     run(["dnf", "install", "-y", "ca-certificates", "openssl", "systemd"], timeout=600)
     run(
@@ -815,6 +985,15 @@ def deploy(
             str(package / "deploy/install-control-plane.sh"),
             str(package / "mcserver-control-plane"),
             str(package / "mcserverctl"),
+        ],
+        capture=False,
+    )
+    if shutil.which("certbot") is None:
+        raise DeployError("certbot is required before production deployment")
+    run(
+        [
+            str(package / "deploy/install-certbot-renewal-hook.sh"),
+            config.service["certbot_lineage"],
         ],
         capture=False,
     )
@@ -828,7 +1007,7 @@ def deploy(
     report.record("no-create preflight", wait_for_ping())
     verify_service(config, report)
 
-    if not go_live:
+    if not go_live and not restore_live_after_upgrade:
         return
 
     live_environment = render_environment(config, node_digest, live=True)
@@ -836,6 +1015,10 @@ def deploy(
     try:
         run(["systemctl", "restart", "mcserver-control-plane.service"])
         report.record("live control plane", wait_for_ping())
+        if not go_live:
+            report.record("live state after upgrade", "preserved")
+            verify_service(config, report)
+            return
         acceptance_script = (
             Path(__file__).resolve().parent.parent / "scripts/live_akamai_e2e.py"
         )
@@ -853,16 +1036,14 @@ def deploy(
                 "--accept-eula",
                 "--socket",
                 "/run/mcserver/control-plane.sock",
-                "--repository",
-                config.acceptance["repository"],
                 "--firewall-id",
-                str(config.akamai["firewall_id"]),
+                str(config.acceptance["firewall_id"]),
                 "--region",
-                config.akamai["region"],
+                config.acceptance["region"],
                 "--image",
-                config.akamai["image"],
+                config.acceptance["image"],
                 "--instance-type",
-                config.akamai["instance_type"],
+                config.acceptance["instance_type"],
                 "--host-port",
                 str(config.acceptance["host_port"]),
             ],

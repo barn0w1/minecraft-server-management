@@ -19,8 +19,13 @@ def fail(message: str, code: int = 1) -> int:
 
 def strip_global_options(arguments: list[str]) -> list[str]:
     result = list(arguments)
-    while result[:1] == ["--retry-lock"] and len(result) >= 2:
-        result = result[2:]
+    while result:
+        if result[:1] == ["--insecure-no-password"]:
+            result = result[1:]
+        elif result[:1] == ["--retry-lock"] and len(result) >= 2:
+            result = result[2:]
+        else:
+            break
     return result
 
 
@@ -95,6 +100,8 @@ def hash_directory(path: Path, generation: int) -> str:
 
 
 def command_init(repository: Path) -> int:
+    if metadata_path(repository).exists():
+        return fail("repository is already initialized")
     repository.mkdir(parents=True, exist_ok=True)
     (repository / "config").write_text("fake-restic-repository\n")
     (repository / "snapshots").mkdir(exist_ok=True)

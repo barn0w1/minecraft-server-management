@@ -21,7 +21,7 @@ or already-deleted resource identifiers whenever possible.
 ## Secrets
 
 The repository, CI workflows, issue tracker, and deterministic E2E tests must remain secret-free.
-Live Akamai and Cloudflare API tokens, TLS private keys, and the restic password belong only on the
-deployed control-plane host or in an explicitly protected deployment environment. Long-lived R2 S3
-secret keys must not be installed on the control plane or remote nodes; nodes receive prefix-scoped
-temporary credentials only after mTLS authentication.
+Live Akamai and Cloudflare API tokens and TLS private keys belong only on the deployed control-plane
+host or in an explicitly protected deployment environment. Restic repositories are intentionally
+created without a password. Long-lived R2 S3 secret keys must not be installed on the control plane
+or remote nodes; nodes receive prefix-scoped temporary credentials only after mTLS authentication.

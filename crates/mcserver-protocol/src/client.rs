@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub mod method {
     pub const SYSTEM_PING: &str = "system.ping";
     pub const SERVER_CREATE: &str = "server.create";
+    pub const SERVER_APPLY: &str = "server.apply";
     pub const SERVER_GET: &str = "server.get";
     pub const SERVER_LIST: &str = "server.list";
     pub const SERVER_STATUS: &str = "server.status";
@@ -72,8 +73,30 @@ const fn default_stop_timeout_seconds() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum DesiredDataSpec {
+    LocalRestic { repository: String },
+    R2Restic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataBackend {
+    LocalRestic,
+    R2Restic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataSpec {
+    pub backend: DataBackend,
     pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesiredServerSpec {
+    pub compute: ComputeSpec,
+    pub process: ProcessSpec,
+    pub data: DesiredDataSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +109,15 @@ pub struct ServerSpec {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateServerParams {
     pub name: String,
-    pub spec: ServerSpec,
+    pub spec: DesiredServerSpec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyServerParams {
+    pub name: String,
+    pub spec: DesiredServerSpec,
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -119,7 +119,7 @@ jobs:
           done
           cp README.md SECURITY.md Cargo.lock dist/package/
           cp dist/BUILD-METADATA dist/package/
-          cp -R deploy docs dist/package/
+          cp -R deploy docs examples dist/package/
           mkdir -p dist/package/scripts
           cp scripts/live_akamai_e2e.py scripts/local_e2e.py dist/package/scripts/
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)

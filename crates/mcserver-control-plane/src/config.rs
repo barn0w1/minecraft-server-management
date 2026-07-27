@@ -28,8 +28,8 @@ const DEFAULT_AKAMAI_API_BASE_URL: &str = "https://api.linode.com/v4";
 const DEFAULT_AKAMAI_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_AKAMAI_REAP_ORPHANS_ON_START: bool = false;
 const DEFAULT_AKAMAI_LIVE_ENABLED: bool = false;
-const DEFAULT_AKAMAI_REGION: &str = "jp-tyo-3";
-const DEFAULT_AKAMAI_IMAGE: &str = "linode/debian13";
+const DEFAULT_AKAMAI_ALLOWED_REGIONS: &str = "jp-tyo-3";
+const DEFAULT_AKAMAI_ALLOWED_IMAGES: &str = "linode/debian13";
 const DEFAULT_AKAMAI_ALLOWED_INSTANCE_TYPES: &str = "g6-nanode-1";
 const DEFAULT_AKAMAI_MAX_ACTIVE_INSTANCES: usize = 1;
 const DEFAULT_AKAMAI_MAX_INSTANCE_LIFETIME_SECONDS: u64 = 12 * 60 * 60;
@@ -49,8 +49,7 @@ const MAX_SECRET_CHARS: usize = 4096;
 const MAX_RUNTIME_ENVIRONMENT_BYTES: usize = 64 * 1024;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_VALUE_CHARS: usize = 16 * 1024;
-const REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS: [&str; 2] =
-    ["RESTIC_PASSWORD", "AWS_DEFAULT_REGION"];
+const REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS: [&str; 1] = ["AWS_DEFAULT_REGION"];
 const SHA256_HEX_CHARS: usize = 64;
 const DEFAULT_REAP_ORPHANS_ON_START: bool = true;
 
@@ -106,10 +105,10 @@ pub struct AkamaiConfig {
     pub request_timeout: Duration,
     pub reap_orphans_on_start: bool,
     pub live_enabled: bool,
-    pub region: String,
-    pub image: String,
-    pub firewall_id: u64,
+    pub allowed_regions: BTreeSet<String>,
+    pub allowed_images: BTreeSet<String>,
     pub allowed_instance_types: BTreeSet<String>,
+    pub allowed_firewall_ids: BTreeSet<u64>,
     pub max_active_instances: usize,
     pub max_instance_lifetime: Duration,
     pub loopback_api: bool,
@@ -140,10 +139,10 @@ impl fmt::Debug for AkamaiConfig {
             .field("request_timeout", &self.request_timeout)
             .field("reap_orphans_on_start", &self.reap_orphans_on_start)
             .field("live_enabled", &self.live_enabled)
-            .field("region", &self.region)
-            .field("image", &self.image)
-            .field("firewall_id", &self.firewall_id)
+            .field("allowed_regions", &self.allowed_regions)
+            .field("allowed_images", &self.allowed_images)
             .field("allowed_instance_types", &self.allowed_instance_types)
+            .field("allowed_firewall_ids", &self.allowed_firewall_ids)
             .field("max_active_instances", &self.max_active_instances)
             .field("max_instance_lifetime", &self.max_instance_lifetime)
             .field("loopback_api", &self.loopback_api)
@@ -181,6 +180,21 @@ impl AkamaiConfig {
     #[must_use]
     pub fn allows_instance_type(&self, value: &str) -> bool {
         self.allowed_instance_types.contains(value)
+    }
+
+    #[must_use]
+    pub fn allows_region(&self, value: &str) -> bool {
+        self.allowed_regions.contains(value)
+    }
+
+    #[must_use]
+    pub fn allows_image(&self, value: &str) -> bool {
+        self.allowed_images.contains(value)
+    }
+
+    #[must_use]
+    pub fn allows_firewall(&self, value: u64) -> bool {
+        self.allowed_firewall_ids.contains(&value)
     }
 }
 
@@ -423,10 +437,10 @@ fn akamai_config(
             "MCSERVER_AKAMAI_REQUEST_TIMEOUT_SECONDS",
             "MCSERVER_AKAMAI_REAP_ORPHANS_ON_START",
             "MCSERVER_AKAMAI_LIVE_ENABLED",
-            "MCSERVER_AKAMAI_REGION",
-            "MCSERVER_AKAMAI_IMAGE",
-            "MCSERVER_AKAMAI_FIREWALL_ID",
+            "MCSERVER_AKAMAI_ALLOWED_REGIONS",
+            "MCSERVER_AKAMAI_ALLOWED_IMAGES",
             "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES",
+            "MCSERVER_AKAMAI_ALLOWED_FIREWALL_IDS",
             "MCSERVER_AKAMAI_MAX_ACTIVE_INSTANCES",
             "MCSERVER_AKAMAI_MAX_INSTANCE_LIFETIME_SECONDS",
         ] {
@@ -459,13 +473,19 @@ fn akamai_config(
         DEFAULT_AKAMAI_REAP_ORPHANS_ON_START,
     )?;
     let live_enabled = parse_bool("MCSERVER_AKAMAI_LIVE_ENABLED", DEFAULT_AKAMAI_LIVE_ENABLED)?;
-    let region = optional_identifier("MCSERVER_AKAMAI_REGION", DEFAULT_AKAMAI_REGION, 64)?;
-    let image = optional_identifier("MCSERVER_AKAMAI_IMAGE", DEFAULT_AKAMAI_IMAGE, 256)?;
-    let firewall_id = parse_required_positive_u64("MCSERVER_AKAMAI_FIREWALL_ID")?;
+    let allowed_regions = parse_identifier_set(
+        "MCSERVER_AKAMAI_ALLOWED_REGIONS",
+        DEFAULT_AKAMAI_ALLOWED_REGIONS,
+    )?;
+    let allowed_images = parse_identifier_set(
+        "MCSERVER_AKAMAI_ALLOWED_IMAGES",
+        DEFAULT_AKAMAI_ALLOWED_IMAGES,
+    )?;
     let allowed_instance_types = parse_identifier_set(
         "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES",
         DEFAULT_AKAMAI_ALLOWED_INSTANCE_TYPES,
     )?;
+    let allowed_firewall_ids = parse_positive_u64_set("MCSERVER_AKAMAI_ALLOWED_FIREWALL_IDS")?;
     let max_active_instances = parse_positive_usize(
         "MCSERVER_AKAMAI_MAX_ACTIVE_INSTANCES",
         DEFAULT_AKAMAI_MAX_ACTIVE_INSTANCES,
@@ -497,10 +517,10 @@ fn akamai_config(
         request_timeout,
         reap_orphans_on_start,
         live_enabled,
-        region,
-        image,
-        firewall_id,
+        allowed_regions,
+        allowed_images,
         allowed_instance_types,
+        allowed_firewall_ids,
         max_active_instances,
         max_instance_lifetime,
         loopback_api,
@@ -680,18 +700,7 @@ fn validate_required_runtime_environment(
 }
 
 fn is_runtime_environment_key(key: &str) -> bool {
-    if !key
-        .bytes()
-        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-    {
-        return false;
-    }
-    matches!(key, "AWS_DEFAULT_REGION")
-        || (key.starts_with("RESTIC_")
-            && !matches!(
-                key,
-                "RESTIC_REPOSITORY" | "RESTIC_PASSWORD_FILE" | "RESTIC_PASSWORD_COMMAND"
-            ))
+    key == "AWS_DEFAULT_REGION"
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, ConfigError> {
@@ -725,19 +734,6 @@ fn optional_scope(name: &'static str, default: &str) -> Result<String, ConfigErr
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         return Err(ConfigError::InvalidScope { name, value });
-    }
-    Ok(value)
-}
-
-fn optional_identifier(
-    name: &'static str,
-    default: &str,
-    maximum: usize,
-) -> Result<String, ConfigError> {
-    let value = optional_string(name, default)?;
-    validate_non_blank(name, &value, maximum)?;
-    if !is_provider_identifier(&value) {
-        return Err(ConfigError::InvalidProviderIdentifier { name, value });
     }
     Ok(value)
 }
@@ -963,19 +959,18 @@ fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, Con
     Ok(value)
 }
 
-fn parse_required_positive_u64(name: &'static str) -> Result<u64, ConfigError> {
-    let value = required_non_blank(name, 32)?;
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|source| ConfigError::InvalidInteger {
-            name,
-            value,
-            source,
-        })?;
-    if parsed == 0 {
-        return Err(ConfigError::ZeroValue(name));
+fn parse_positive_u64_set(name: &'static str) -> Result<BTreeSet<u64>, ConfigError> {
+    let raw = required_non_blank(name, 4096)?;
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::parse::<u64>)
+        .collect::<Result<BTreeSet<_>, _>>();
+    match values {
+        Ok(values) if !values.is_empty() && !values.contains(&0) => Ok(values),
+        _ => Err(ConfigError::InvalidPositiveIntegerSet { name, value: raw }),
     }
-    Ok(parsed)
 }
 
 fn parse_positive_duration(name: &'static str, default: u64) -> Result<Duration, ConfigError> {
@@ -1037,6 +1032,8 @@ pub enum ConfigError {
     InvalidProviderIdentifier { name: &'static str, value: String },
     #[error("{name} must be a non-empty comma-separated identifier list: {value}")]
     InvalidIdentifierSet { name: &'static str, value: String },
+    #[error("{name} must be a comma-separated set of positive integers: {value}")]
+    InvalidPositiveIntegerSet { name: &'static str, value: String },
     #[error("{name} must be a boolean, got {value}")]
     InvalidBoolean { name: &'static str, value: String },
     #[error("local agent listen address is invalid")]
@@ -1168,8 +1165,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_environment_requires_restic_password_and_r2_region() {
-        let values = BTreeMap::from([("RESTIC_PASSWORD".to_owned(), "test".to_owned())]);
+    fn runtime_environment_requires_r2_region() {
+        let values = BTreeMap::new();
         assert!(matches!(
             validate_required_runtime_environment(&values),
             Err(ConfigError::MissingRequiredRuntimeEnvironmentKey(
@@ -1180,10 +1177,7 @@ mod tests {
 
     #[test]
     fn runtime_environment_rejects_blank_required_values() {
-        let values = BTreeMap::from([
-            ("RESTIC_PASSWORD".to_owned(), "test".to_owned()),
-            ("AWS_DEFAULT_REGION".to_owned(), "   ".to_owned()),
-        ]);
+        let values = BTreeMap::from([("AWS_DEFAULT_REGION".to_owned(), "   ".to_owned())]);
         assert!(matches!(
             validate_required_runtime_environment(&values),
             Err(ConfigError::BlankRequiredRuntimeEnvironmentValue(
@@ -1193,8 +1187,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_environment_only_accepts_restic_and_aws_names() {
-        assert!(is_runtime_environment_key("RESTIC_PASSWORD"));
+    fn runtime_environment_only_accepts_r2_region() {
+        assert!(!is_runtime_environment_key("RESTIC_PASSWORD"));
         assert!(is_runtime_environment_key("AWS_DEFAULT_REGION"));
         assert!(!is_runtime_environment_key("AWS_ACCESS_KEY_ID"));
         assert!(!is_runtime_environment_key("AWS_SECRET_ACCESS_KEY"));

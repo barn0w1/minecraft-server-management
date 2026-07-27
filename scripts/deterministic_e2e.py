@@ -253,7 +253,6 @@ def main() -> int:
             "MCSERVER_FAKE_RUNTIME_DIRECTORY": str(runtime),
             "MCSERVER_FAKE_PODMAN_FAIL_ONCE": "start",
             "MCSERVER_FAKE_RESTIC_FAIL_ONCE": "backup",
-            "RESTIC_PASSWORD": "deterministic-test-only",
             "RUST_LOG": (
                 "mcserver_control_plane=info,mcserver_node_agent=info"
             ),

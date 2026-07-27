@@ -1,124 +1,92 @@
-# Development conventions
+# 開発と検証
 
-## Naming
+## Toolchain
 
-Follow standard Rust conventions:
+- Rust 1.97.1 (`rust-toolchain.toml`)
+- edition 2024
+- Python 3
+- OpenSSL
+- systemd tools (`systemd-analyze`、`systemd-sysusers`)
 
-- packages: `kebab-case`
-- modules, functions, variables, SQL columns, and JSON fields: `snake_case`
-- types, traits, and variants: `UpperCamelCase`
-- constants: `SCREAMING_SNAKE_CASE`
-- identifiers: singular resource name plus `Id`
-- JSON-RPC methods: `resource.verb`
-
-Project terms:
-
-- `Server`: durable client-facing desired state plus convenient opaque configuration.
-- `ServerInstance`: one materialization; do not call it a runtime.
-- `ComputeInstance`: one temporary execution allocation.
-- `Snapshot`: one durable opaque data generation.
-- `generation`: client-controlled desired-state revision.
-- `fencing_token`: monotonically increasing Server-scoped writer token.
-
-## Module layout
-
-Use the file-plus-directory module layout and do not add `mod.rs`:
-
-```text
-application.rs
-application/
-└── server_service.rs
+```bash
+rustup toolchain install 1.97.1 \
+  --profile minimal \
+  --component rustfmt,clippy
 ```
 
-The root file declares child modules and explicitly re-exports the public surface.
+## 必須検証
 
-## Boundaries
+まとめて実行:
 
-- Domain code does not depend on wire DTOs, SQLx, Tokio, Podman, or restic.
-- `mcserver-protocol` owns wire types only, not business rules.
-- Transport handlers delegate to application services or infrastructure adapters.
-- External command details stay in the node-agent executor.
-- `/data` remains opaque.
-- Reconciler-owned resources are read-only through the client API.
-- Add a resource only when it has a genuinely independent lifecycle, identity, sharing model, or API.
+```bash
+scripts/verify.sh
+```
 
-## State and reconciliation
+個別の内容:
 
-- The database is authoritative; queue sends are best effort.
-- External operations must be idempotent or recoverable after uncertain responses. Provider creates use deterministic identity and discovery before retrying.
-- Persist observations, not one combined global phase.
-- Isolate a Server's reconciliation error from the daemon and other Servers.
-- Enforce concurrency invariants in SQLite as well as in code.
-- Validate fencing tokens before publishing authoritative data.
+```bash
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo build --locked --workspace
 
-## Time
+python3 -m py_compile scripts/*.py scripts/fakes/*.py deploy/*.py
+python3 -m unittest discover -s deploy -p 'test_*.py'
+bash -n deploy/*.sh
 
-- persistent wall clock: `UnixTimestampMillis`
-- SQL/JSON representation: non-negative integer milliseconds since Unix epoch
-- names: `*_at_ms`
-- durations/deadlines/backoff: `Duration` and monotonic timers
-- create timestamps at the boundary where the corresponding fact is observed
-- preserve chronological ordering when persisting after wall-clock rollback
+python3 scripts/deterministic_e2e.py
+python3 scripts/remote_provider_e2e.py
+```
 
-## SQL
+CI はこの順序を実行します。最後の2本は real Rust daemon と fake external dependency の
+process-level E2E で、課金 resource や real credential を使いません。
 
-Use SQL literals or `&'static str` constants with bind parameters. Use `QueryBuilder` only when SQL structure must be dynamic. Do not use `AssertSqlSafe` merely to bypass SQLx auditing.
+## E2E の層
 
-Schema constraints must mirror domain invariants. Migration files are immutable after release; during the current pre-release phase, this repository may intentionally replace the experimental schema when the change is documented.
+| Test | 実物 | fake | 目的 |
+|---|---|---|---|
+| unit | domain/parser/repository | 外部全部 | invariants |
+| deterministic | control plane、agent、SQLite | Podman、restic | lifecycle、retry、cleanup |
+| remote provider | 上記 + TLS + HTTP adapter | Akamai/R2 API、Podman、restic | mTLS、scoped credential、uncertain response |
+| local E2E | Podman、restic、Minecraft | なし | host integration |
+| live acceptance | Akamai、R2、Minecraft | なし | production 2世代 |
 
-## External processes
+## 境界
 
-- use argument APIs, never shell interpolation
-- set `kill_on_drop(true)` for bounded command execution
-- capture stdout/stderr and include a bounded diagnostic on failure
-- use deterministic resource names and complete ownership labels; revalidate ownership before destructive provider calls
-- scope local runtime resources so cleanup never targets another control-plane installation
-- verify an untracked PID still belongs to the intended local agent before signaling it
-- treat timeout responses as uncertain and do not reuse a desynchronized RPC session
+- domain は wire DTO、SQLx、Tokio、Podman、restic に依存しない
+- `mcserver-protocol` は wire type だけを持つ
+- transport handler は application service へ委譲する
+- `/data` は不透明
+- DB が正本で queue は best effort
+- external mutation は idempotent または uncertain response から回復可能にする
+- provider delete は ID だけで行わず、label と scope tag を再検証する
+- snapshot 公開前に fencing token を検証する
+- migration file は release 後に書き換えず、新しい番号を追加する
 
-## Daemon lifecycle
+## 命名
 
-Long-running tasks must observe a shared cancellation token, stop accepting new work, drain safely, and be supervised. Durable consistency must not depend on abrupt process termination.
+- package: `kebab-case`
+- Rust module/function/variable、SQL/JSON field: `snake_case`
+- type/trait/variant: `UpperCamelCase`
+- constant: `SCREAMING_SNAKE_CASE`
+- JSON-RPC method: `resource.verb`
+- persistent timestamp: Unix epoch milliseconds、suffix `_at_ms`
 
-Control-plane shutdown deliberately leaves active local agents and Minecraft containers running so they can reconnect. Explicit Server desired state controls Minecraft shutdown.
+## External process
+
+- shell string ではなく argument API を使う
+- timeout と bounded diagnostic を持たせる
+- restic は全 command で `--insecure-no-password` と `--retry-lock` を使う
+- remote root agent は host access、local rootless agent は `podman unshare` を使う
+- node systemd hardening は rootful Podman の `/var`、`/run`、sysctl、setuid helper を妨げない
 
 ## Git
 
-Use reviewable imperative Conventional Commit subjects where practical. Author and committer identity:
+commit author/committer:
 
 ```text
 barn0w1 <yuito.kiuchi.dev@gmail.com>
 ```
 
-## External command conventions
-
-- Node-agent restic commands use `--retry-lock`; `MCSERVER_NODE_AGENT_RESTIC_RETRY_LOCK_SECONDS` defaults to 300 seconds.
-- Any operation that reads, writes, restores, or removes container-owned server data runs through `podman unshare`; host-side recursive filesystem operations must not assume subordinate-ID-owned paths are accessible.
-- Command timeout and repository-lock wait are durations, never persisted wall-clock timestamps.
-
-
-## Test layers
-
-Use the cheapest layer that proves the change:
-
-1. unit tests for domain rules, parsers, and retry calculations
-2. `scripts/deterministic_e2e.py` for daemon, transport, persistence, reconciliation, retry, and cleanup behavior
-3. `scripts/local_e2e.py --skip-port-check` for real Podman/restic infrastructure
-4. `scripts/remote_provider_e2e.py` for TLS enrollment, the real HTTP adapter, uncertain-response recovery, and remote lifecycle
-5. `scripts/local_e2e.py` for actual Minecraft readiness and two-generation data recovery
-
-Fake executables must model command-line contracts and persistent observations, not reimplement production business rules.
-## External HTTP providers
-
-- Use an official API specification as the contract; keep provider DTOs inside the adapter.
-- Configure a bounded request timeout and preserve structured provider errors.
-- Treat `429` as scheduling information and honor a valid `Retry-After`.
-- Search by deterministic identity before create and after uncertain create responses.
-- Treat not-found delete as converged absence.
-- Never delete using a provider ID alone; verify the expected label and ownership scope.
-- Redact bearer tokens and per-compute credentials from `Debug` output.
-- Allow plaintext HTTP only for an explicitly loopback test endpoint.
-
-## Node data ownership
-
-`MCSERVER_NODE_AGENT_DATA_ACCESS_MODE` accepts `auto`, `podman_user_namespace`, or `host`. `auto` chooses host access for an effective UID of zero and Podman user-namespace access otherwise. Local rootless execution should use the namespace mode; the remote root systemd bootstrap sets host mode explicitly. Restic, directory swaps, and recursive cleanup must all use the selected mode.
+Conventional Commit の imperative subject を基本とします。

@@ -2,7 +2,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, DesiredState, Server, ServerId, ServerName, ServerSpec, SystemClock, ValidationError,
+        Clock, DesiredServerSpec, DesiredState, Server, ServerId, ServerName, SystemClock,
+        ValidationError,
     },
     infrastructure::{RepositoryError, ServerRepository},
     reconciliation::ReconcileScheduler,
@@ -13,24 +14,85 @@ pub struct ServerService {
     repository: ServerRepository,
     reconcile_scheduler: ReconcileScheduler,
     clock: SystemClock,
+    r2_repository_base: Option<String>,
 }
 
 impl ServerService {
     #[must_use]
-    pub fn new(repository: ServerRepository, reconcile_scheduler: ReconcileScheduler) -> Self {
+    pub fn new(
+        repository: ServerRepository,
+        reconcile_scheduler: ReconcileScheduler,
+        r2_repository_base: Option<String>,
+    ) -> Self {
         Self {
             repository,
             reconcile_scheduler,
             clock: SystemClock,
+            r2_repository_base,
         }
     }
 
-    pub async fn create(&self, name: String, spec: ServerSpec) -> Result<Server, ApplicationError> {
+    pub async fn create(
+        &self,
+        name: String,
+        desired_spec: DesiredServerSpec,
+    ) -> Result<Server, ApplicationError> {
         let now = self.clock.now()?;
-        let server = Server::new(ServerId::new(), ServerName::new(name)?, spec, now)?;
+        let id = ServerId::new();
+        let spec = desired_spec.resolve(None, self.r2_repository(id))?;
+        let server = Server::new(id, ServerName::new(name)?, spec, now)?;
         self.repository.create(&server).await?;
         self.reconcile_scheduler.enqueue_best_effort(server.id);
         Ok(server)
+    }
+
+    pub async fn apply(
+        &self,
+        name: String,
+        desired_spec: DesiredServerSpec,
+        expected_generation: Option<u64>,
+    ) -> Result<Server, ApplicationError> {
+        let name = ServerName::new(name)?;
+        for _ in 0..3 {
+            let Some(mut server) = self.repository.get_by_name(&name).await? else {
+                if expected_generation.is_some() {
+                    return Err(ApplicationError::NotFound);
+                }
+                return self
+                    .create(name.as_str().to_owned(), desired_spec.clone())
+                    .await;
+            };
+            if expected_generation.is_some_and(|expected| expected != server.generation) {
+                return Err(ApplicationError::GenerationConflict {
+                    expected: expected_generation,
+                    actual: server.generation,
+                });
+            }
+            let spec = desired_spec
+                .clone()
+                .resolve(Some(&server.spec.data), None)?;
+            let previous_generation = server.generation;
+            let now = self.clock.now()?;
+            if !server.update_spec(spec, now)? {
+                return Ok(server);
+            }
+            if self
+                .repository
+                .update_spec(&server, previous_generation)
+                .await?
+            {
+                self.reconcile_scheduler.enqueue_best_effort(server.id);
+                return Ok(server);
+            }
+            if expected_generation.is_some() {
+                let actual = self.get(server.id).await?.generation;
+                return Err(ApplicationError::GenerationConflict {
+                    expected: expected_generation,
+                    actual,
+                });
+            }
+        }
+        Err(ApplicationError::ConcurrentUpdate)
     }
 
     pub async fn get(&self, id: ServerId) -> Result<Server, ApplicationError> {
@@ -85,6 +147,12 @@ impl ServerService {
         }
 
         Err(ApplicationError::ConcurrentUpdate)
+    }
+
+    fn r2_repository(&self, server_id: ServerId) -> Option<String> {
+        self.r2_repository_base
+            .as_ref()
+            .map(|base| format!("{base}/servers/{server_id}/restic"))
     }
 }
 

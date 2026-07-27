@@ -45,5 +45,5 @@ Then validate and enable:
   systemctl status mcserver-control-plane.service
   mcserverctl --socket /run/mcserver/control-plane.sock ping
   systemctl enable mcserver-control-plane.service
-See docs/production-deployment-checkpoint.md before enabling billable creation.
+See docs/production-installation.ja.md before enabling billable creation.
 MESSAGE

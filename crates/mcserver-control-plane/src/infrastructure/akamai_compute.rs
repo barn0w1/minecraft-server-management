@@ -38,6 +38,7 @@ struct InstanceProvisioningRequest<'a> {
     region: &'a str,
     instance_type: &'a str,
     image: &'a str,
+    firewall_id: u64,
     instance: &'a ServerInstance,
     compute: &'a ComputeInstance,
     allow_create: bool,
@@ -90,13 +91,19 @@ impl AkamaiComputeManager {
     }
 
     pub async fn preflight(&self) -> Result<AkamaiPreflightSummary, AkamaiComputeError> {
-        self.client
-            .verify_bootstrap_compatibility(&self.config.image, &self.config.region)
-            .await?;
+        for region in &self.config.allowed_regions {
+            for image in &self.config.allowed_images {
+                self.client
+                    .verify_bootstrap_compatibility(image, region)
+                    .await?;
+            }
+        }
         for instance_type in &self.config.allowed_instance_types {
             self.client.verify_instance_type(instance_type).await?;
         }
-        self.client.verify_firewall(self.config.firewall_id).await?;
+        for firewall_id in &self.config.allowed_firewall_ids {
+            self.client.verify_firewall(*firewall_id).await?;
+        }
         let managed_instances = self
             .client
             .list_managed_instances(&self.config.scope)
@@ -138,16 +145,14 @@ impl AkamaiComputeManager {
         image: &str,
         firewall_id: u64,
     ) -> Result<(), AkamaiComputeError> {
-        if region != self.config.region {
+        if !self.config.allows_region(region) {
             return Err(AkamaiComputeError::RegionNotAllowed {
                 requested: region.to_owned(),
-                allowed: self.config.region.clone(),
             });
         }
-        if image != self.config.image {
+        if !self.config.allows_image(image) {
             return Err(AkamaiComputeError::ImageNotAllowed {
                 requested: image.to_owned(),
-                allowed: self.config.image.clone(),
             });
         }
         if !self.config.allows_instance_type(instance_type) {
@@ -155,11 +160,8 @@ impl AkamaiComputeManager {
                 instance_type.to_owned(),
             ));
         }
-        if firewall_id != self.config.firewall_id {
-            return Err(AkamaiComputeError::FirewallNotAllowed {
-                requested: firewall_id,
-                required: self.config.firewall_id,
-            });
+        if !self.config.allows_firewall(firewall_id) {
+            return Err(AkamaiComputeError::FirewallNotAllowed(firewall_id));
         }
         Ok(())
     }
@@ -273,8 +275,14 @@ impl AkamaiComputeManager {
                     .map_err(AkamaiComputeError::InvalidProviderId)?;
                 match self.client.get_instance(provider_id).await? {
                     Some(provider) if provider.is_owned_by(&label, &self.scope_tag()) => {
-                        self.verify_provider_configuration(&provider, region, instance_type, image)
-                            .await?;
+                        self.verify_provider_configuration(
+                            &provider,
+                            region,
+                            instance_type,
+                            image,
+                            firewall_id,
+                        )
+                        .await?;
                         provider
                     }
                     Some(provider) => {
@@ -294,6 +302,7 @@ impl AkamaiComputeManager {
                             region,
                             instance_type,
                             image,
+                            firewall_id,
                             instance,
                             compute: &compute,
                             allow_create: instance.data_prepared_at.is_none(),
@@ -308,6 +317,7 @@ impl AkamaiComputeManager {
                     region,
                     instance_type,
                     image,
+                    firewall_id,
                     instance,
                     compute: &compute,
                     allow_create: instance.data_prepared_at.is_none(),
@@ -353,6 +363,7 @@ impl AkamaiComputeManager {
             region,
             instance_type,
             image,
+            firewall_id,
             instance,
             compute,
             allow_create,
@@ -364,8 +375,14 @@ impl AkamaiComputeManager {
                     expected_label: label.to_owned(),
                 });
             }
-            self.verify_provider_configuration(&existing, region, instance_type, image)
-                .await?;
+            self.verify_provider_configuration(
+                &existing,
+                region,
+                instance_type,
+                image,
+                firewall_id,
+            )
+            .await?;
             return Ok(existing);
         }
         if !allow_create {
@@ -377,7 +394,7 @@ impl AkamaiComputeManager {
             .verify_bootstrap_compatibility(image, region)
             .await?;
         self.client.verify_instance_type(instance_type).await?;
-        self.client.verify_firewall(self.config.firewall_id).await?;
+        self.client.verify_firewall(firewall_id).await?;
         let active = self
             .client
             .list_managed_instances(&self.config.scope)
@@ -406,14 +423,14 @@ impl AkamaiComputeManager {
             booted: true,
             authorized_keys: bootstrap.authorized_keys,
             tags: vec![MANAGED_TAG.to_owned(), self.scope_tag()],
-            firewall_id: self.config.firewall_id,
+            firewall_id,
             disk_encryption: DiskEncryption::Disabled,
             metadata: MetadataRequest {
                 user_data: bootstrap.user_data_base64,
             },
         };
         let provider = self.client.create_instance(&request).await?;
-        self.verify_provider_configuration(&provider, region, instance_type, image)
+        self.verify_provider_configuration(&provider, region, instance_type, image, firewall_id)
             .await?;
         Ok(provider)
     }
@@ -424,10 +441,11 @@ impl AkamaiComputeManager {
         region: &str,
         instance_type: &str,
         image: &str,
+        firewall_id: u64,
     ) -> Result<(), AkamaiComputeError> {
         provider.verify_configuration(region, instance_type, image)?;
         self.client
-            .verify_instance_firewall(provider.id, self.config.firewall_id)
+            .verify_instance_firewall(provider.id, firewall_id)
             .await
     }
 
@@ -1024,14 +1042,14 @@ pub enum AkamaiComputeError {
         "billable Akamai creation and startup orphan reaping are disabled; set MCSERVER_AKAMAI_LIVE_ENABLED=true after preflight"
     )]
     LiveOperationsDisabled,
-    #[error("Akamai region {requested} is not allowed; configured region is {allowed}")]
-    RegionNotAllowed { requested: String, allowed: String },
-    #[error("Akamai image {requested} is not allowed; configured image is {allowed}")]
-    ImageNotAllowed { requested: String, allowed: String },
+    #[error("Akamai region is not allowed: {requested}")]
+    RegionNotAllowed { requested: String },
+    #[error("Akamai image is not allowed: {requested}")]
+    ImageNotAllowed { requested: String },
     #[error("Akamai instance type is not allowed: {0}")]
     InstanceTypeNotAllowed(String),
-    #[error("Akamai firewall {requested} is not allowed; required firewall is {required}")]
-    FirewallNotAllowed { requested: u64, required: u64 },
+    #[error("Akamai firewall is not allowed: {0}")]
+    FirewallNotAllowed(u64),
     #[error("Akamai managed instance limit is already reached: active={active}, maximum={maximum}")]
     ActiveInstanceLimitReached { active: usize, maximum: usize },
     #[error(

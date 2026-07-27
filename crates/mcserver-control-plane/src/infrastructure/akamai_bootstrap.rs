@@ -10,7 +10,7 @@ use crate::{
 };
 
 const MAX_AUTHORIZED_KEYS_BYTES: usize = 64 * 1024;
-const MAX_CA_BYTES: usize = 64 * 1024;
+const MAX_CA_BYTES: usize = 1024 * 1024;
 const REMOTE_STATE_DIRECTORY: &str = "/var/lib/mcserver/node-agent";
 const CONTAINER_STORAGE_DIRECTORY: &str = "/var/lib/containers";
 const CONTAINER_RUNTIME_DIRECTORY: &str = "/run/containers";

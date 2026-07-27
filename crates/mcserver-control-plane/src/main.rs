@@ -143,6 +143,12 @@ async fn preflight(config: Config) -> Result<(), ControlPlaneError> {
 
 async fn run(config: Config) -> Result<(), ControlPlaneError> {
     let pool = connect_database(&config.database_url).await?;
+    let r2_repository_base = config.r2.as_ref().map(|r2| {
+        format!(
+            "s3:https://{}.r2.cloudflarestorage.com/{}",
+            r2.account_id, r2.bucket
+        )
+    });
     let server_repository = ServerRepository::new(pool.clone());
     let instance_repository = ServerInstanceRepository::new(pool.clone());
     let compute_repository = ComputeInstanceRepository::new(pool.clone());
@@ -256,7 +262,11 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         compute_repository.clone(),
         agents.clone(),
     );
-    let server_service = ServerService::new(server_repository, reconcile_scheduler.clone());
+    let server_service = ServerService::new(
+        server_repository,
+        reconcile_scheduler.clone(),
+        r2_repository_base,
+    );
     let server_instance_service = ServerInstanceService::new(instance_repository.clone());
     let rpc_handler = ClientRpcHandler::new(
         server_service,

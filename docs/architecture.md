@@ -1,151 +1,112 @@
-# Architecture
+# アーキテクチャ
 
-## Boundary
+## システム境界
 
-A `Server` is the durable, client-facing aggregate that says:
+control plane は Minecraft の `/data` を不透明なデータとして扱います。担当するのは、
+排他的な実行、restore、正常停止、snapshot 公開、一時 compute の削除です。mod、
+plugin、world、`server.properties` の内容は解釈しません。
 
-> Run this opaque Minecraft data with this minimum process and compute configuration.
-
-The aggregate is intentionally convenient rather than ontologically pure. Data and launch settings remain embedded until they require an independent lifecycle, sharing model, or client API.
-
-The system does not interpret arbitrary files under `/data`. Humans remain responsible for Minecraft-specific configuration consistency.
-
-## Resources
+## Resource
 
 ### Server
 
-Client-owned and durable. It contains:
+利用者が管理する永続 resource です。
 
-- `desired_state`: `running` or `stopped`
-- local or Akamai compute selection
-- minimum itzg container settings
-- opaque restic repository reference
-- current authoritative snapshot ID
-- optimistic `generation`
+- 一意な名前と UUID
+- `running` / `stopped` の desired state
+- Akamai compute、Minecraft process、storage の設定
+- 現在の authoritative snapshot
+- optimistic concurrency 用の `generation`
 
-Changing desired state returns after the database commit. It does not wait for external work.
+`server.apply` は名前で upsert します。定義変更は停止中だけ許可され、storage backend
+と自動割当済み R2 repository は不変です。
 
 ### ServerInstance
 
-Reconciler-owned and durable. It represents one materialization of a Server and records:
-
-- the source Server generation and resolved specification
-- the source and result snapshot IDs
-- a monotonically increasing Server-scoped fencing token
-- independent observations for data preparation and process execution
-- stop intent, errors, and terminal result
-
-SQLite enforces at most one active ServerInstance per Server.
+reconciler が作る1回分の実行です。Server ごとに active なものは最大1つです。
+source snapshot、解決済み設定、fencing token、観測状態、result snapshot を記録します。
 
 ### ComputeInstance
 
-Reconciler-owned and temporary. The `local_process` provider maps one ComputeInstance to one `mcserver-node-agent` child process and its private state directory. The `akamai` provider maps it to one Linode API instance with a deterministic label, managed/scope tags, provider ID, and observed public IPv4 address.
-
-ComputeInstance and ServerInstance lifecycles are separate. A ComputeInstance can disappear or be recreated while a ServerInstance remains active, provided writable data has not been lost.
+1つの ServerInstance を実行する一時 allocation です。本番では Akamai VM、ローカル
+検証では child process です。provider resource の所有権は UUID 由来 label と2つの
+tag をすべて照合します。
 
 ### Snapshot
 
-A restic snapshot is published only by the active ServerInstance holding the matching fencing token. Publication updates the instance result and `Server.current_snapshot_id` in one SQLite transaction.
+active ServerInstance の fencing token が一致した場合だけ公開されます。snapshot の
+記録と `Server.current_snapshot_id` の更新は1つの SQLite transaction です。
 
-## Desired state and reconciliation
+## 状態遷移
 
-The database is the source of truth. Queue notifications only reduce latency; periodic resynchronization recovers missed notifications and process restarts.
-
-Each reconcile step performs at most one idempotent transition and then observes again. There is no global phase enum combining Server, instance, compute, agent, data, and process state.
-
-Running converges through these facts:
-
-```text
-active ServerInstance exists
-active provider-specific ComputeInstance exists
-node agent is connected
-/data is prepared from source_snapshot_id or empty initialization
-Minecraft container is observed running
+```mermaid
+stateDiagram-v2
+    [*] --> Stopped
+    Stopped --> Provisioning: desired=running
+    Provisioning --> Running: restore + Minecraft ready
+    Running --> Stopping: desired=stopped
+    Stopping --> Snapshotting: Minecraft stopped
+    Snapshotting --> Stopped: publish + VM delete
 ```
 
-Stopping converges through these facts:
+queue は反応時間を短縮するだけで、正本は SQLite です。定期 reconcile により通知欠落や
+process restart から復旧します。各 reconcile は小さな idempotent operation を1つずつ
+進め、失敗は Server 単位で backoff 付き再試行します。
+
+## データの正本
+
+| 状態 | writable data の正本 |
+|---|---|
+| 停止中 | `Server.current_snapshot_id` が指す R2 snapshot |
+| 実行中 | active fenced ServerInstance の `/data` |
+| 停止完了 | 新しく公開された R2 snapshot |
+
+書き込み済みデータを持つ VM が snapshot 前に消失した場合、古い snapshot から黙って
+再作成しません。データ損失の可能性を明示して停止します。
+
+## R2 と restic
+
+R2 を選んだ Server の repository は control plane が次の形式で決定します。
 
 ```text
-stop intent recorded
-Minecraft container observed stopped
-restic snapshot created and fenced publication committed
-container removed
-node agent and ComputeInstance removed
-ServerInstance completed
+s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/servers/<SERVER_UUID>/restic
 ```
 
-A reconcile failure is isolated to its Server, stored as `last_error`, and retried. It does not stop the daemon.
+node agent は `restic cat config` で存在確認し、未作成なら `restic init` を実行します。
+すべての restic command は `--insecure-no-password` を使用します。
 
-## Data authority
+remote node には mTLS 登録後、その repository prefix だけを read/write できる短期 R2
+credential をメモリ上で渡します。Cloudflare API token と parent credential は control
+plane にだけ置きます。
 
-```text
-Server stopped:
-  Server.current_snapshot_id is authoritative.
+## Akamai provider
 
-Server running:
-  the active fenced ServerInstance's /data is the only writable copy.
+Server 定義は region、image、instance type、firewall ID を持ちます。global 設定の
+allowlist に全項目が含まれる場合だけ作成できます。control plane は作成前に provider
+API で存在・利用可能性を確認します。
 
-Stop completed:
-  the newly published snapshot becomes authoritative.
-```
+create response を失っても deterministic label で既存 VM を adopt します。delete response
+を失った後の `404` は削除完了として扱います。disk encryption は performance を優先して
+明示的に無効化します。
 
-If the control plane loses the only compute holding prepared writable data before a result snapshot is published, it refuses to silently recreate from an older snapshot and reports writable-data loss.
+ephemeral node の systemd unit は rootful Podman が必要とする標準的な host access を
+許可します。`ProtectSystem=strict` や path ごとの `ReadWritePaths` は Podman の
+`/run/libpod`、netavark、image unpack と競合するため使用しません。
 
-## Interfaces
+## 通信と認証
 
-Two JSON-RPC interfaces are intentionally separate:
+| Interface | Transport | 用途 |
+|---|---|---|
+| client API | Unix socket JSON-RPC | `mcserverctl`、将来の bot/UI |
+| local agent API | loopback TCP JSON-RPC | ローカル E2E |
+| remote agent API | TLS + private client CA | Akamai node |
 
-1. Client API: local human tools and bots use a Unix socket.
-2. Agent API: node agents initiate a network connection to the control plane.
+remote node は秘密鍵を node 内で生成し、一回限りの enrollment token で CSR を提出します。
+発行後は mTLS certificate、exact leaf certificate、reconnect token、active
+ComputeInstance をすべて照合します。
 
-They share the JSON-RPC envelope only. Their DTOs, methods, framing, trust boundary, and versioning are separate.
+## 証明書
 
-The local agent listener binds only to a loopback address. The remote listener is separate, terminates TLS directly in the control plane, and validates a configured server certificate and private client CA. Connections are always initiated by the node agent. A listener accepts only the expected provider, so an Akamai credential cannot register through the local boundary.
-
-Local agents use a per-Compute reconnect token directly. Akamai cloud-init receives a separate one-time enrollment token. The remote node generates a P-256 private key locally and submits a CSR over server-authenticated TLS. The control plane records one issued certificate per active ComputeInstance and returns its chain with a stable reconnect token. The agent persists the key, chain, and token mode `0600`, then reconnects with mTLS. A successful mTLS registration clears the enrollment token from SQLite. Steady-state authentication requires the active ComputeInstance, exact reconnect token, exact recorded leaf certificate DER, valid certificate lifetime, and matching provider.
-
-The client API also has a reusable Unix-socket client and `mcserverctl`. `server.status` is a read-only projection combining the durable Server, its active instance and compute allocation, and current agent connectivity; it does not introduce another persisted phase or resource.
-
-## Time model
-
-Persistent wall-clock timestamps use a single representation:
-
-- domain: `UnixTimestampMillis`
-- SQLite: non-negative `INTEGER`
-- JSON: non-negative integer
-- unit: milliseconds since the Unix epoch
-- field suffix: `_at_ms`
-
-Timeouts, backoff, polling, and elapsed time use `Duration` and monotonic timers. Repository updates preserve per-resource chronological ordering if the wall clock moves backwards.
-
-## Process shutdown
-
-The control plane handles `SIGINT` and `SIGTERM` cooperatively:
-
-1. stop accepting client and agent connections
-2. stop reconciliation after its current idempotent operation
-3. drain supervised tasks up to a configured deadline
-4. close SQLite and remove the Unix socket
-
-Control-plane shutdown does not intentionally stop active Minecraft containers or local agents. The agents reconnect after the control plane restarts, allowing reconciliation to continue from durable state.
-
-Local Podman containers carry managed, installation-scope, Server, ServerInstance, and ComputeInstance labels. Each local allocation also has control-plane-owned runtime metadata containing its ComputeInstance ID, local scope, PID, Linux boot ID, and process start time. On startup the control plane compares container labels and state directories with active database rows, verifies saved process identity without reading another process's environment, then removes only scoped orphan resources. The boot ID and start time prevent a reused PID from being signaled. This cleanup is recovery from lost local bookkeeping, not a replacement for normal desired-state shutdown.
-## Akamai provider reconciliation
-
-The provider boundary is selected by the resolved `ServerInstance` specification and by the persisted `ComputeInstance.provider`; deletion never depends on the current mutable Server configuration.
-
-Akamai ownership is established by all three facts:
-
-```text
-provider label = mcserver-<ComputeInstance UUID>
-managed tag    = mcserver-managed
-scope tag      = mcserver-scope-<installation scope>
-```
-
-Create checks the exact label before issuing `POST`. This recovers a provider-side success whose HTTP response was lost. GET and DELETE revalidate label and tags before controlling a persisted provider ID. `429 Retry-After` participates in reconcile scheduling. Startup orphan deletion is opt-in and restricted to the configured scope.
-
-The cloud-init bootstrap installs the node agent as a systemd service and verifies the immutable downloaded binary SHA-256. It contains no restic or object-storage credential. After mTLS authentication, the control plane derives the exact Server repository prefix, obtains a short-lived Cloudflare R2 `object-read-write` credential restricted to that prefix, and returns it with the restic password in memory. The node agent requires the access key, secret key, session token, and `AWS_DEFAULT_REGION=auto`, then applies them only to restic subprocesses. Long-lived S3 credentials are never persisted on a node. Minecraft remains managed by the same node-agent executor used by the proven local slice; provider code never interprets `/data`.
-
-## Node data ownership boundary
-
-Node-agent data operations use one explicit ownership boundary. Local rootless processes operate through `podman unshare`; remote root systemd agents operate directly on the host filesystem. Restic, restore swaps, and cleanup never mix these modes within one agent process.
+public server certificate は Certbot が管理します。Rust daemon に ACME client を組み込まず、
+証明書取得・renewal は専用ツールへ委譲します。deploy hook が新しい certificate と key の
+対応を検証し、control plane を再起動して `ping` を確認します。失敗時は直前の組へ戻します。

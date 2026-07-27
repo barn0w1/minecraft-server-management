@@ -90,6 +90,7 @@ impl AgentExecutor {
         }
 
         ensure_private_directory(&self.config.state_directory).await?;
+        self.ensure_restic_repository(&params.repository).await?;
         match params.source_snapshot_id.as_deref() {
             Some(snapshot_id) => {
                 self.restore_snapshot(&params.repository, snapshot_id)
@@ -357,7 +358,20 @@ impl AgentExecutor {
         if check.status.success() {
             return Ok(());
         }
-        Err(command_failure("restic cat config", &check))
+        let initialization = self
+            .run_restic_allow_failure(repository, ["init"], None)
+            .await?;
+        if initialization.status.success() {
+            info!(%repository, "initialized passwordless restic repository");
+            return Ok(());
+        }
+        let second_check = self
+            .run_restic_allow_failure(repository, ["cat", "config"], None)
+            .await?;
+        if second_check.status.success() {
+            return Ok(());
+        }
+        Err(command_failure("restic init", &initialization))
     }
 
     async fn create_container(
@@ -521,6 +535,7 @@ impl AgentExecutor {
         command
             .envs(runtime_environment)
             .env("RESTIC_REPOSITORY", repository)
+            .arg("--insecure-no-password")
             .arg("--retry-lock")
             .arg(retry_lock)
             .args(arguments);

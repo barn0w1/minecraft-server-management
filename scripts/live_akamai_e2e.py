@@ -40,7 +40,6 @@ def parse_args() -> argparse.Namespace:
         default=Path("/run/mcserver/control-plane.sock"),
         help="control-plane Unix socket",
     )
-    parser.add_argument("--repository", required=True, help="initialized restic repository URL")
     parser.add_argument("--firewall-id", required=True, type=int)
     parser.add_argument("--region", default="jp-tyo-3")
     parser.add_argument("--image", default="linode/debian13")
@@ -89,7 +88,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--stop-timeout-seconds must be positive")
     if args.timeout_seconds <= 0 or args.cleanup_timeout_seconds <= 0:
         raise ValueError("timeouts must be positive")
-    for name in ("repository", "region", "image", "instance_type"):
+    for name in ("region", "image", "instance_type"):
         value = str(getattr(args, name))
         if not value.strip() or "\0" in value:
             raise ValueError(f"--{name.replace('_', '-')} must be non-blank")
@@ -280,7 +279,7 @@ def main() -> int:
                         "accept_eula": True,
                         "environment": {},
                     },
-                    "data": {"repository": args.repository},
+                    "data": {"backend": "r2_restic"},
                 },
             },
         )

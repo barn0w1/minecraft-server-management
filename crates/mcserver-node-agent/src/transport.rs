@@ -41,8 +41,7 @@ const CLIENT_CERTIFICATE_FILE_NAME: &str = "client-certificate-chain.pem";
 const MAX_CONNECTION_TOKEN_CHARS: usize = 256;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_VALUE_CHARS: usize = 16 * 1024;
-const REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS: [&str; 5] = [
-    "RESTIC_PASSWORD",
+const REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS: [&str; 4] = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
@@ -505,15 +504,13 @@ fn validate_runtime_environment(
         return Err(TransportError::InvalidRuntimeEnvironment);
     }
     for (key, value) in values {
-        if !(key.starts_with("RESTIC_") || key.starts_with("AWS_"))
-            || !key
-                .bytes()
-                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-            || matches!(
-                key.as_str(),
-                "RESTIC_REPOSITORY" | "RESTIC_PASSWORD_FILE" | "RESTIC_PASSWORD_COMMAND"
-            )
-            || value.contains('\0')
+        if !matches!(
+            key.as_str(),
+            "AWS_ACCESS_KEY_ID"
+                | "AWS_SECRET_ACCESS_KEY"
+                | "AWS_SESSION_TOKEN"
+                | "AWS_DEFAULT_REGION"
+        ) || value.contains('\0')
             || value.chars().count() > MAX_RUNTIME_ENVIRONMENT_VALUE_CHARS
         {
             return Err(TransportError::InvalidRuntimeEnvironment);
@@ -882,7 +879,7 @@ mod tests {
 
     #[test]
     fn remote_registration_requires_complete_storage_credentials() {
-        let values = BTreeMap::from([("RESTIC_PASSWORD".to_owned(), "test".to_owned())]);
+        let values = BTreeMap::from([("AWS_DEFAULT_REGION".to_owned(), "auto".to_owned())]);
         assert!(validate_runtime_environment(&values, true).is_err());
         assert!(validate_runtime_environment(&values, false).is_ok());
     }
@@ -890,7 +887,6 @@ mod tests {
     #[test]
     fn remote_registration_accepts_complete_storage_credentials() {
         let values = BTreeMap::from([
-            ("RESTIC_PASSWORD".to_owned(), "test".to_owned()),
             ("AWS_ACCESS_KEY_ID".to_owned(), "id".to_owned()),
             ("AWS_SECRET_ACCESS_KEY".to_owned(), "secret".to_owned()),
             ("AWS_SESSION_TOKEN".to_owned(), "session".to_owned()),

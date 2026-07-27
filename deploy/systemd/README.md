@@ -1,9 +1,20 @@
-# AlmaLinux 10 systemd deployment
+# systemd 配置
 
-The production service runs as the dedicated `mcserver` system user and binds the remote node-agent
-listener directly on TCP 443 with `CAP_NET_BIND_SERVICE`. No reverse proxy terminates TLS.
+`mcserver-control-plane.service` は AlmaLinux 10 の専用 `mcserver` user で動作し、TCP 443 の
+TLS を直接終端します。reverse proxy は使用しません。
 
-The unit uses five systemd credentials:
+## 配置先
+
+| 種類 | Path |
+|---|---|
+| non-secret config | `/etc/mcserver/control-plane.env` |
+| public PKI | `/etc/mcserver/pki/` |
+| root credential | `/etc/mcserver/credentials/` |
+| authorized keys | `/etc/mcserver/authorized_keys` |
+| SQLite | `/var/lib/mcserver/` |
+| Unix socket / temporary PKI | `/run/mcserver/` |
+
+systemd credential:
 
 - `akamai-api-token`
 - `r2-api-token`
@@ -11,49 +22,8 @@ The unit uses five systemd credentials:
 - `agent-client-ca-private-key.pem`
 - `r2-runtime.env`
 
-Store their source files under `/etc/mcserver/credentials`, owner `root:root`, mode `0600`. Public
-certificates and CA certificates belong under `/etc/mcserver/pki`. Non-secret settings belong in
-`/etc/mcserver/control-plane.env`.
+手動配置より [`deploy/production_deploy.py`](../production_deploy.py) を使用してください。
+正しい順序は [本番導入手順](../../docs/production-installation.ja.md) にあります。
 
-Install verified release binaries and the unit:
-
-```bash
-sudo ./deploy/install-control-plane.sh ./mcserver-control-plane ./mcserverctl
-```
-
-Generate the private agent client CA once:
-
-```bash
-./deploy/generate-agent-client-ca.sh ./agent-client-ca
-```
-
-Populate every required file and replace every `REPLACE_...` value in the installed environment file.
-Keep these settings for the first startup:
-
-```text
-MCSERVER_AKAMAI_LIVE_ENABLED=false
-MCSERVER_AKAMAI_REAP_ORPHANS_ON_START=false
-```
-
-Then start and inspect the preflight result:
-
-```bash
-sudo systemctl start mcserver-control-plane.service
-sudo systemctl status mcserver-control-plane.service
-sudo journalctl -u mcserver-control-plane.service --since today
-mcserverctl --socket /run/mcserver/control-plane.sock ping
-```
-
-`ExecStartPre` validates the database, PKI, scoped R2 temporary credential issuance, Akamai profile,
-existing firewall, and managed-instance limit before binding the service. Live-disabled mode blocks new billable creation and startup orphan
-reaping, but it does not prevent a known ownership-verified VM from being stopped and deleted.
-
-For a repeatable installation, use
-[`deploy/production_deploy.py`](../production_deploy.py) and its
-[`configuration example`](../production-deploy.toml.example). The script
-performs immutable release verification, installation, no-create preflight,
-service and TLS verification, and the optional live two-generation acceptance
-test while producing a secret-free JSON report.
-
-The full security boundary and manual reference procedures are in
-[`docs/production-deployment-checkpoint.md`](../../docs/production-deployment-checkpoint.md).
+service hardening は control plane に対して適用されます。一方、ephemeral VM 上の node agent
+unit は rootful Podman を動かすため、path 単位の read-only sandbox を使用しません。

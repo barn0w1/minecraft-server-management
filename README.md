@@ -1,172 +1,67 @@
-# Minecraft Server Management System
+# minecraft-server-management
 
-A Rust control plane and node agent for running temporary local or Akamai Cloud Minecraft compute while keeping server data persistent.
+Akamai Cloud の一時 VM で Minecraft サーバーを実行し、ワールドデータを
+Cloudflare R2 に永続化する Rust 製コントロールプレーンです。
 
-The system deliberately treats the Minecraft `/data` directory as opaque. It owns restore, exclusive execution, snapshot publication, and process lifecycle, but it does not parse or rewrite arbitrary Minecraft, mod, plugin, or world files.
+Minecraft の実行中だけ VM を保持します。停止要求を受けると Minecraft を正常停止し、
+`/data` 全体を restic snapshot として R2 に保存してから VM を削除します。次回は最新
+snapshot を新しい VM へ復元します。
 
-## Implemented vertical slices
+## v0.2.0 の運用モデル
 
-The local provider executes this complete flow on one Linux host:
+- `Server` ごとに Akamai の region、instance type、image、firewall、Minecraft 設定を管理
+- server 定義は TOML ファイルで宣言し、`mcserverctl server apply` で作成・更新
+- R2 の保存先は `servers/<Server UUID>/restic` として自動割当
+- restic repository は初回起動時に自動作成
+- restic は `--insecure-no-password` を常に使用し、パスワードを保管しない
+- 一時 VM へ渡す R2 credential は、その server の prefix のみに制限された短期 credential
+- global 設定は利用可能な Akamai resource の allowlist と同時実行上限だけを保持
+- node agent は mTLS で control plane へ接続し、VM 側に長期 cloud credential を保存しない
+- Certbot の更新 hook が証明書を検証して反映し、異常時は直前の証明書へ戻す
 
-```text
-client JSON-RPC over Unix socket
-  -> Server desired_state = running
-  -> reconciler creates one active ServerInstance
-  -> local ComputeInstance spawns mcserver-node-agent
-  -> node agent restores the Server snapshot with restic, or creates empty /data
-  -> node agent starts itzg/minecraft-server with Podman
-  -> Server desired_state = stopped
-  -> node agent stops Minecraft
-  -> node agent creates a restic snapshot
-  -> control plane publishes it after checking the fencing token
-  -> container and local node-agent resources are removed
-  -> ServerInstance is completed
-```
+## 最初に読む文書
 
-Starting the same Server again resolves the new instance from the previously published snapshot.
+1. [外部インフラの前提](docs/production-prerequisites.ja.md)
+2. [クリーンなホストへの本番導入](docs/production-installation.ja.md)
+3. [Server の作成と通常運用](docs/operations.ja.md)
 
-The Akamai provider adds a second complete compute path:
+設計と開発については
+[アーキテクチャ](docs/architecture.md)、
+[client API](docs/client-api.md)、
+[開発と検証](docs/development.md)
+を参照してください。
 
-```text
-Server desired_state = running
-  -> durable Akamai ComputeInstance and deterministic provider label
-  -> Linode API create or adoption after an uncertain response
-  -> cloud-init installs and verifies mcserver-node-agent
-  -> node agent generates a private key, enrolls over TLS, and reconnects with an issued mTLS certificate
-  -> the existing opaque restore, Minecraft, stop, snapshot, and publish flow runs remotely
-  -> Linode API deletion removes the ephemeral VM
-```
-
-The provider implementation is real, but the repository's acceptance test uses a local fake Linode API so CI never creates billable resources. See [remote provider checkpoint](docs/remote-provider-checkpoint.md) for live-run prerequisites.
-
-The resource model remains small:
-
-- `Server`: durable client-owned desired state and convenient opaque launch/data configuration.
-- `ServerInstance`: one reconciler-owned materialization of a Server. At most one is active per Server.
-- `ComputeInstance`: one temporary execution allocation backed by `local_process` or an Akamai Cloud VM.
-- `Snapshot`: one durable restic snapshot published by an active fenced ServerInstance.
-
-## Workspace
+## 構成
 
 ```text
 crates/
-├── mcserver-control-plane/
-├── mcserver-node-agent/
-└── mcserver-protocol/
+  mcserver-control-plane/  SQLite、reconciler、Akamai/R2、client/agent API
+  mcserver-node-agent/     Podman、Minecraft、restic restore/snapshot
+  mcserver-protocol/       client/agent 間の JSON-RPC DTO
+deploy/                    本番インストーラー、systemd、Certbot hook
+migrations/                SQLite migration
+scripts/                   ローカルおよび provider E2E
 ```
 
-- Rust edition: 2024
-- pinned toolchain: Rust 1.97.1
-- client API: JSON-RPC 2.0 over `/run/mcserver/control-plane.sock`
-- agent API: loopback TCP for local agents and direct TLS with private-CA mTLS for remote agents
-- persistence: SQLite
-- local data snapshots: restic
-- local Minecraft execution: rootless Podman and `itzg/minecraft-server`
-- operator CLI: `mcserverctl`
-- fast integration verifiers: real Rust daemons with deterministic fake Podman/restic and a fake Linode API
+固定 toolchain は Rust 1.97.1、edition は 2024 です。
 
-## Local prerequisites
+## 開発時の検証
 
-Install and configure these in the same user account that runs the control plane:
-
-- Rust 1.97.1
-- Podman
-- restic
-- Python 3 and OpenSSL for the included deterministic E2E verifiers
-
-Confirm that rootless Podman works before testing:
+全検証は1 command で実行できます。
 
 ```bash
-podman info
-restic version
+scripts/verify.sh
 ```
 
-Minecraft requires explicit acceptance of its EULA. The API therefore rejects a Server specification unless `accept_eula` is `true`. Only set it after reading and accepting the Minecraft EULA.
+内部の deterministic E2E は fake Podman、fake restic、fake provider API を利用し、課金
+resource を作成しません。実際の Akamai VM を使う acceptance は
+`deploy/production_deploy.py deploy --go-live` だけが実行します。
 
-## Build and run locally
+## 重要な境界
 
-This branch replaces the experimental migration history with a new initial schema. Remove a database created by an earlier revision before starting this version.
-
-```bash
-cargo build --workspace
-
-podman unshare rm -rf -- "$PWD/var/local-agents"
-rm -rf -- "$PWD/var"
-mkdir -p "$PWD/var"
-
-export RESTIC_PASSWORD='local-development-only'
-export MCSERVER_CONTROL_PLANE_SOCKET="$PWD/var/control-plane.sock"
-export MCSERVER_CONTROL_PLANE_DATABASE_URL="sqlite://$PWD/var/control-plane.db?mode=rwc"
-export MCSERVER_CONTROL_PLANE_AGENT_LISTEN_ADDRESS='127.0.0.1:39001'
-export MCSERVER_CONTROL_PLANE_NODE_AGENT_BINARY="$PWD/target/debug/mcserver-node-agent"
-export MCSERVER_CONTROL_PLANE_NODE_AGENT_ROOT="$PWD/var/local-agents"
-export RUST_LOG='mcserver_control_plane=debug,mcserver_node_agent=info'
-
-target/debug/mcserver-control-plane
-```
-
-The control plane passes its environment to local node-agent processes, including restic credentials such as `RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, and backend-specific credentials.
-
-In another terminal, run the two-generation E2E verifier:
-
-```bash
-export RESTIC_PASSWORD='local-development-only'
-python3 scripts/local_e2e.py \
-  --socket "$PWD/var/control-plane.sock" \
-  --repository "$PWD/var/restic-repository" \
-  --host-port 25565
-```
-
-The verifier performs two complete start/stop cycles. It checks Minecraft's TCP port by default, verifies snapshot publication, verifies that the next fencing token increases, and verifies that the second instance uses the first snapshot as its source.
-
-For a faster infrastructure-only check that does not wait for Minecraft to accept TCP connections:
-
-```bash
-python3 scripts/local_e2e.py \
-  --socket "$PWD/var/control-plane.sock" \
-  --repository "$PWD/var/restic-repository" \
-  --host-port 25565 \
-  --skip-port-check
-```
-
-The verifier refuses to start when the selected Podman publish port cannot be bound. On failure it first requests a normal stop and then force-removes only containers carrying this project's managed, local-scope, and Server labels.
-
-For routine development, use the deterministic process-level E2E. It starts the real control-plane and node-agent binaries, but substitutes small fake Podman and restic executables. It also seeds an orphan container, node-agent process, and state directory, then injects one transient Podman and restic failure:
-
-```bash
-cargo build --workspace
-python3 scripts/deterministic_e2e.py
-python3 scripts/remote_provider_e2e.py
-```
-
-The remote provider verifier additionally exercises the production mTLS transport, production Akamai HTTP client, and Cloudflare R2 Temporary Credentials API client against local fake APIs. It checks one-time CSR enrollment, exact certificate authentication, prefix-scoped session credentials, lost-create-response adoption, scoped orphan deletion, two generations, and VM deletion without using a real API token or creating a VM:
-
-```bash
-python3 scripts/remote_provider_e2e.py
-```
-
-The fake API also verifies the production compatibility preflight for `linode/debian13` in `jp-tyo-3`: the image must advertise `cloud-init` and the region must advertise `Metadata` before any create request is accepted.
-
-Basic operation no longer requires hand-written JSON:
-
-```bash
-target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" ping
-target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" server list
-target/debug/mcserverctl --socket "$PWD/var/control-plane.sock" server status SERVER_ID
-```
-
-## Validation
-
-The same fast validation runs in `.github/workflows/ci.yml`. The workflow uses the pinned toolchain and does not require Podman or restic because its vertical-slice job uses the deterministic substitutes.
-
-```bash
-cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-python3 -m py_compile scripts/*.py scripts/fakes/*.py
-python3 scripts/deterministic_e2e.py
-python3 scripts/remote_provider_e2e.py
-```
-
-See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), [remote provider checkpoint](docs/remote-provider-checkpoint.md), [automated production deployment](docs/automated-production-deployment.md), [production deployment checkpoint](docs/production-deployment-checkpoint.md), and [roadmap](docs/roadmap.md).
+- Minecraft EULA への同意は server 定義で明示する必要があります。
+- `/data` 内のファイルを control plane は解釈・編集しません。
+- 稼働中の server 定義は変更できません。停止完了後に `server apply` します。
+- storage backend と repository は Server 作成後に変更できません。
+- SQLite は desired state と監査履歴の正本、停止済み snapshot は R2 がデータの正本です。
+- Discord bot や Web UI は Unix socket の client API を利用する別 client として実装します。

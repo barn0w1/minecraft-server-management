@@ -1,17 +1,14 @@
-use std::{collections::BTreeMap, env, error::Error, path::PathBuf};
+use std::{env, error::Error, path::PathBuf};
 
 use mcserver_control_plane::client::UnixRpcClient;
-use mcserver_protocol::client::method;
+use mcserver_protocol::client::{ComputeSpec, DesiredDataSpec, ProcessSpec, method};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/mcserver/control-plane.sock";
-const DEFAULT_CONTAINER_IMAGE: &str = "docker.io/itzg/minecraft-server:latest";
-const DEFAULT_SERVER_TYPE: &str = "VANILLA";
-const DEFAULT_MINECRAFT_VERSION: &str = "LATEST";
-const DEFAULT_HOST_PORT: u16 = 25565;
-const DEFAULT_STOP_TIMEOUT_SECONDS: u64 = 60;
+const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -29,14 +26,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliError> {
     match command {
-        Command::Ping => client
-            .call_value(method::SYSTEM_PING, Value::Null)
-            .await
-            .map_err(Into::into),
-        Command::ServerList => client
-            .call_value(method::SERVER_LIST, Value::Null)
-            .await
-            .map_err(Into::into),
+        Command::Ping => call(client, method::SYSTEM_PING, Value::Null).await,
+        Command::ServerList => call(client, method::SERVER_LIST, Value::Null).await,
         Command::ServerGet { server_id } => {
             call_server_id(client, method::SERVER_GET, server_id).await
         }
@@ -49,44 +40,51 @@ async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliE
         Command::ServerStart { server_id } => set_desired_state(client, server_id, "running").await,
         Command::ServerStop { server_id } => set_desired_state(client, server_id, "stopped").await,
         Command::ServerCreate(options) => {
-            let options = *options;
-            let compute = match options.compute {
-                CreateCompute::Local => json!({ "provider": "local" }),
-                CreateCompute::Akamai {
-                    region,
-                    instance_type,
-                    image,
-                    firewall_id,
-                } => json!({
-                    "provider": "akamai",
-                    "region": region,
-                    "instance_type": instance_type,
-                    "image": image,
-                    "firewall_id": firewall_id,
-                }),
-            };
-            let params = json!({
-                "name": options.name,
-                "spec": {
-                    "compute": compute,
-                    "process": {
-                        "container_image": options.container_image,
-                        "server_type": options.server_type,
-                        "version": options.version,
-                        "host_port": options.host_port,
-                        "stop_timeout_seconds": options.stop_timeout_seconds,
-                        "accept_eula": true,
-                        "environment": options.environment,
-                    },
-                    "data": { "repository": options.repository },
-                },
-            });
-            client
-                .call_value(method::SERVER_CREATE, params)
-                .await
-                .map_err(Into::into)
+            apply_definition(client, method::SERVER_CREATE, options, None).await
         }
+        Command::ServerApply {
+            options,
+            expected_generation,
+        } => apply_definition(client, method::SERVER_APPLY, options, expected_generation).await,
     }
+}
+
+async fn apply_definition(
+    client: &UnixRpcClient,
+    method_name: &str,
+    options: DefinitionOptions,
+    expected_generation: Option<u64>,
+) -> Result<Value, CliError> {
+    let definition = ServerDefinition::load(&options.file)?;
+    let mut params = json!({
+        "name": definition.name,
+        "spec": {
+            "compute": definition.compute,
+            "process": definition.process,
+            "data": definition.data,
+        },
+    });
+    if let Some(generation) = expected_generation {
+        params["expected_generation"] = generation.into();
+    }
+    let server = call(client, method_name, params).await?;
+    if !options.start {
+        return Ok(server);
+    }
+    let id = server
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or(CliError::InvalidServerResponse)?
+        .parse()
+        .map_err(CliError::InvalidUuid)?;
+    set_desired_state_from_resource(client, id, server, "running").await
+}
+
+async fn call(client: &UnixRpcClient, method_name: &str, params: Value) -> Result<Value, CliError> {
+    client
+        .call_value(method_name, params)
+        .await
+        .map_err(Into::into)
 }
 
 async fn call_server_id(
@@ -94,10 +92,7 @@ async fn call_server_id(
     method_name: &str,
     server_id: Uuid,
 ) -> Result<Value, CliError> {
-    client
-        .call_value(method_name, json!({ "server_id": server_id }))
-        .await
-        .map_err(Into::into)
+    call(client, method_name, json!({ "server_id": server_id })).await
 }
 
 async fn set_desired_state(
@@ -106,21 +101,29 @@ async fn set_desired_state(
     desired_state: &str,
 ) -> Result<Value, CliError> {
     let server = call_server_id(client, method::SERVER_GET, server_id).await?;
+    set_desired_state_from_resource(client, server_id, server, desired_state).await
+}
+
+async fn set_desired_state_from_resource(
+    client: &UnixRpcClient,
+    server_id: Uuid,
+    server: Value,
+    desired_state: &str,
+) -> Result<Value, CliError> {
     let generation = server
         .get("generation")
         .and_then(Value::as_u64)
         .ok_or(CliError::InvalidServerResponse)?;
-    client
-        .call_value(
-            method::SERVER_SET_DESIRED_STATE,
-            json!({
-                "server_id": server_id,
-                "desired_state": desired_state,
-                "expected_generation": generation,
-            }),
-        )
-        .await
-        .map_err(Into::into)
+    call(
+        client,
+        method::SERVER_SET_DESIRED_STATE,
+        json!({
+            "server_id": server_id,
+            "desired_state": desired_state,
+            "expected_generation": generation,
+        }),
+    )
+    .await
 }
 
 struct Invocation {
@@ -150,10 +153,9 @@ impl Invocation {
                 break;
             }
         }
-        let command = parse_command(positional)?;
         Ok(Self {
             socket_path,
-            command,
+            command: parse_command(positional)?,
         })
     }
 }
@@ -161,12 +163,26 @@ impl Invocation {
 enum Command {
     Ping,
     ServerList,
-    ServerGet { server_id: Uuid },
-    ServerStatus { server_id: Uuid },
-    ServerInstances { server_id: Uuid },
-    ServerStart { server_id: Uuid },
-    ServerStop { server_id: Uuid },
-    ServerCreate(Box<CreateOptions>),
+    ServerGet {
+        server_id: Uuid,
+    },
+    ServerStatus {
+        server_id: Uuid,
+    },
+    ServerInstances {
+        server_id: Uuid,
+    },
+    ServerStart {
+        server_id: Uuid,
+    },
+    ServerStop {
+        server_id: Uuid,
+    },
+    ServerCreate(DefinitionOptions),
+    ServerApply {
+        options: DefinitionOptions,
+        expected_generation: Option<u64>,
+    },
 }
 
 fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -191,169 +207,108 @@ fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
             }
         }
         [resource, action, rest @ ..] if resource == "server" && action == "create" => {
-            Ok(Command::ServerCreate(Box::new(CreateOptions::parse(rest)?)))
+            Ok(Command::ServerCreate(DefinitionOptions::parse(rest)?))
+        }
+        [resource, action, rest @ ..] if resource == "server" && action == "apply" => {
+            let (options, expected_generation) = DefinitionOptions::parse_apply(rest)?;
+            Ok(Command::ServerApply {
+                options,
+                expected_generation,
+            })
         }
         _ => Err(CliError::Usage),
     }
 }
 
-struct CreateOptions {
-    name: String,
-    repository: String,
-    compute: CreateCompute,
-    container_image: String,
-    server_type: String,
-    version: String,
-    host_port: u16,
-    stop_timeout_seconds: u64,
-    environment: BTreeMap<String, String>,
+struct DefinitionOptions {
+    file: PathBuf,
+    start: bool,
 }
 
-enum CreateCompute {
-    Local,
-    Akamai {
-        region: String,
-        instance_type: String,
-        image: String,
-        firewall_id: u64,
-    },
-}
-
-impl CreateOptions {
+impl DefinitionOptions {
     fn parse(arguments: &[String]) -> Result<Self, CliError> {
-        let mut name = None;
-        let mut repository = None;
-        let mut compute_provider = "local".to_owned();
-        let mut akamai_region = None;
-        let mut akamai_type = None;
-        let mut akamai_image = None;
-        let mut akamai_firewall_id = None;
-        let mut container_image = DEFAULT_CONTAINER_IMAGE.to_owned();
-        let mut server_type = DEFAULT_SERVER_TYPE.to_owned();
-        let mut version = DEFAULT_MINECRAFT_VERSION.to_owned();
-        let mut host_port = DEFAULT_HOST_PORT;
-        let mut stop_timeout_seconds = DEFAULT_STOP_TIMEOUT_SECONDS;
-        let mut accept_eula = false;
-        let mut environment = BTreeMap::new();
-        let mut index = 0;
+        let (options, expected_generation) = Self::parse_apply(arguments)?;
+        if expected_generation.is_some() {
+            return Err(CliError::CreateExpectedGeneration);
+        }
+        Ok(options)
+    }
 
+    fn parse_apply(arguments: &[String]) -> Result<(Self, Option<u64>), CliError> {
+        let mut file = None;
+        let mut start = false;
+        let mut expected_generation = None;
+        let mut index = 0;
         while index < arguments.len() {
-            let flag = arguments[index].as_str();
-            match flag {
-                "--accept-eula" => {
-                    accept_eula = true;
+            match arguments[index].as_str() {
+                "--start" => {
+                    start = true;
                     index += 1;
                 }
-                "--name"
-                | "--repository"
-                | "--compute"
-                | "--akamai-region"
-                | "--akamai-type"
-                | "--akamai-image"
-                | "--akamai-firewall-id"
-                | "--image"
-                | "--type"
-                | "--version"
-                | "--port"
-                | "--stop-timeout"
-                | "--env" => {
+                "--file" | "--expected-generation" => {
+                    let flag = arguments[index].as_str();
                     let value = arguments
                         .get(index + 1)
                         .ok_or_else(|| CliError::MissingFlagValueOwned(flag.to_owned()))?;
-                    match flag {
-                        "--name" => name = Some(value.clone()),
-                        "--repository" => repository = Some(value.clone()),
-                        "--compute" => compute_provider = value.clone(),
-                        "--akamai-region" => akamai_region = Some(value.clone()),
-                        "--akamai-type" => akamai_type = Some(value.clone()),
-                        "--akamai-image" => akamai_image = Some(value.clone()),
-                        "--akamai-firewall-id" => {
-                            let id = value.parse().map_err(|source| CliError::InvalidInteger {
-                                flag: "--akamai-firewall-id",
+                    if flag == "--file" {
+                        file = Some(PathBuf::from(value));
+                    } else {
+                        let generation =
+                            value.parse().map_err(|source| CliError::InvalidInteger {
+                                flag: "--expected-generation",
                                 value: value.clone(),
                                 source,
                             })?;
-                            if id == 0 {
-                                return Err(CliError::ZeroValue("--akamai-firewall-id"));
-                            }
-                            akamai_firewall_id = Some(id);
+                        if generation == 0 {
+                            return Err(CliError::ZeroValue("--expected-generation"));
                         }
-                        "--image" => container_image = value.clone(),
-                        "--type" => server_type = value.clone(),
-                        "--version" => version = value.clone(),
-                        "--port" => {
-                            host_port =
-                                value.parse().map_err(|source| CliError::InvalidInteger {
-                                    flag: "--port",
-                                    value: value.clone(),
-                                    source,
-                                })?;
-                            if host_port == 0 {
-                                return Err(CliError::ZeroValue("--port"));
-                            }
-                        }
-                        "--stop-timeout" => {
-                            stop_timeout_seconds =
-                                value.parse().map_err(|source| CliError::InvalidInteger {
-                                    flag: "--stop-timeout",
-                                    value: value.clone(),
-                                    source,
-                                })?;
-                            if stop_timeout_seconds == 0 {
-                                return Err(CliError::ZeroValue("--stop-timeout"));
-                            }
-                        }
-                        "--env" => {
-                            let (key, value) = value
-                                .split_once('=')
-                                .ok_or_else(|| CliError::InvalidEnvironment(value.clone()))?;
-                            if key.is_empty() {
-                                return Err(CliError::InvalidEnvironment(value.to_owned()));
-                            }
-                            environment.insert(key.to_owned(), value.to_owned());
-                        }
-                        _ => return Err(CliError::Usage),
+                        expected_generation = Some(generation);
                     }
                     index += 2;
                 }
-                _ => return Err(CliError::UnknownFlag(flag.to_owned())),
+                flag => return Err(CliError::UnknownFlag(flag.to_owned())),
             }
         }
-
-        if !accept_eula {
-            return Err(CliError::EulaNotAccepted);
-        }
-        let compute = match compute_provider.as_str() {
-            "local" => {
-                if akamai_region.is_some()
-                    || akamai_type.is_some()
-                    || akamai_image.is_some()
-                    || akamai_firewall_id.is_some()
-                {
-                    return Err(CliError::AkamaiFlagsRequireAkamaiCompute);
-                }
-                CreateCompute::Local
-            }
-            "akamai" => CreateCompute::Akamai {
-                region: akamai_region.ok_or(CliError::MissingRequiredFlag("--akamai-region"))?,
-                instance_type: akamai_type.ok_or(CliError::MissingRequiredFlag("--akamai-type"))?,
-                image: akamai_image.ok_or(CliError::MissingRequiredFlag("--akamai-image"))?,
-                firewall_id: akamai_firewall_id
-                    .ok_or(CliError::MissingRequiredFlag("--akamai-firewall-id"))?,
+        Ok((
+            Self {
+                file: file.ok_or(CliError::MissingRequiredFlag("--file"))?,
+                start,
             },
-            _ => return Err(CliError::InvalidComputeProvider(compute_provider)),
-        };
-        Ok(Self {
-            name: name.ok_or(CliError::MissingRequiredFlag("--name"))?,
-            repository: repository.ok_or(CliError::MissingRequiredFlag("--repository"))?,
-            compute,
-            container_image,
-            server_type,
-            version,
-            host_port,
-            stop_timeout_seconds,
-            environment,
-        })
+            expected_generation,
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerDefinition {
+    schema_version: u32,
+    name: String,
+    compute: ComputeSpec,
+    process: ProcessSpec,
+    data: DesiredDataSpec,
+}
+
+impl ServerDefinition {
+    fn load(path: &PathBuf) -> Result<Self, CliError> {
+        let bytes = std::fs::read(path).map_err(|source| CliError::DefinitionIo {
+            path: path.clone(),
+            source,
+        })?;
+        if bytes.len() > MAX_DEFINITION_BYTES {
+            return Err(CliError::DefinitionTooLarge {
+                actual: bytes.len(),
+                maximum: MAX_DEFINITION_BYTES,
+            });
+        }
+        let text = std::str::from_utf8(&bytes).map_err(CliError::DefinitionEncoding)?;
+        let definition: Self = toml::from_str(text)?;
+        if definition.schema_version != 1 {
+            return Err(CliError::UnsupportedDefinitionSchema(
+                definition.schema_version,
+            ));
+        }
+        Ok(definition)
     }
 }
 
@@ -380,15 +335,23 @@ enum CliError {
     ZeroValue(&'static str),
     #[error("server id is invalid")]
     InvalidUuid(#[source] uuid::Error),
-    #[error("--env must use KEY=VALUE, got {0}")]
-    InvalidEnvironment(String),
-    #[error("--compute must be local or akamai, got {0}")]
-    InvalidComputeProvider(String),
-    #[error("Akamai flags require --compute akamai")]
-    AkamaiFlagsRequireAkamaiCompute,
-    #[error("server.create requires --accept-eula")]
-    EulaNotAccepted,
-    #[error("control-plane returned a server without a valid generation")]
+    #[error("--expected-generation is only valid with server apply")]
+    CreateExpectedGeneration,
+    #[error("server definition {path} could not be read")]
+    DefinitionIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("server definition is not UTF-8")]
+    DefinitionEncoding(#[source] std::str::Utf8Error),
+    #[error("server definition is invalid TOML")]
+    DefinitionToml(#[from] toml::de::Error),
+    #[error("server definition is {actual} bytes; maximum is {maximum}")]
+    DefinitionTooLarge { actual: usize, maximum: usize },
+    #[error("server definition schema_version {0} is unsupported; expected 1")]
+    UnsupportedDefinitionSchema(u32),
+    #[error("control-plane returned an invalid server resource")]
     InvalidServerResponse,
     #[error(transparent)]
     Client(#[from] mcserver_control_plane::client::RpcClientError),
@@ -402,17 +365,14 @@ const USAGE: &str = r#"Usage:
   mcserverctl [--socket PATH] server instances SERVER_ID
   mcserverctl [--socket PATH] server start SERVER_ID
   mcserverctl [--socket PATH] server stop SERVER_ID
-  mcserverctl [--socket PATH] server create \
-    --name NAME --repository PATH --accept-eula \
-    [--compute local|akamai] \
-    [--akamai-region REGION --akamai-type TYPE --akamai-image IMAGE \
-     --akamai-firewall-id ID] [--image IMAGE] [--type TYPE] \
-    [--version VERSION] [--port PORT] [--stop-timeout SECONDS] \
-    [--env KEY=VALUE]..."#;
+  mcserverctl [--socket PATH] server create --file FILE [--start]
+  mcserverctl [--socket PATH] server apply --file FILE [--start]
+    [--expected-generation GENERATION]"#;
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, Command, CreateCompute, CreateOptions, parse_command};
+    use super::{CliError, Command, DefinitionOptions, ServerDefinition, parse_command};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_status_command() {
@@ -425,90 +385,56 @@ mod tests {
     }
 
     #[test]
-    fn create_requires_a_nonzero_port() {
-        let result = CreateOptions::parse(&[
-            "--name".to_owned(),
-            "test".to_owned(),
-            "--repository".to_owned(),
-            "/tmp/repository".to_owned(),
-            "--accept-eula".to_owned(),
-            "--port".to_owned(),
-            "0".to_owned(),
-        ]);
-        assert!(matches!(result, Err(CliError::ZeroValue("--port"))));
-    }
-
-    #[test]
-    fn parses_akamai_create_options() {
-        let result = CreateOptions::parse(&[
-            "--name".to_owned(),
-            "remote".to_owned(),
-            "--repository".to_owned(),
-            "s3:s3.example.invalid/bucket".to_owned(),
-            "--accept-eula".to_owned(),
-            "--compute".to_owned(),
-            "akamai".to_owned(),
-            "--akamai-region".to_owned(),
-            "jp-tyo-3".to_owned(),
-            "--akamai-type".to_owned(),
-            "g6-nanode-1".to_owned(),
-            "--akamai-image".to_owned(),
-            "linode/debian13".to_owned(),
-            "--akamai-firewall-id".to_owned(),
-            "123".to_owned(),
-        ]);
-
+    fn create_requires_a_definition_file() {
         assert!(matches!(
-            result,
-            Ok(CreateOptions {
-                compute: CreateCompute::Akamai {
-                    firewall_id: 123,
-                    ..
-                },
-                ..
-            })
+            DefinitionOptions::parse(&[]),
+            Err(CliError::MissingRequiredFlag("--file"))
         ));
     }
 
     #[test]
-    fn requires_akamai_firewall_id() {
-        let result = CreateOptions::parse(&[
-            "--name".to_owned(),
-            "remote".to_owned(),
-            "--repository".to_owned(),
-            "s3:s3.example.invalid/bucket".to_owned(),
-            "--accept-eula".to_owned(),
-            "--compute".to_owned(),
-            "akamai".to_owned(),
-            "--akamai-region".to_owned(),
-            "jp-tyo-3".to_owned(),
-            "--akamai-type".to_owned(),
-            "g6-nanode-1".to_owned(),
-            "--akamai-image".to_owned(),
-            "linode/debian13".to_owned(),
-        ]);
+    fn parses_r2_server_definition() -> Result<(), Box<dyn std::error::Error>> {
+        let definition: ServerDefinition = toml::from_str(
+            r#"
+schema_version = 1
+name = "community"
 
-        assert!(matches!(
-            result,
-            Err(CliError::MissingRequiredFlag("--akamai-firewall-id"))
-        ));
+[compute]
+provider = "akamai"
+region = "jp-tyo-3"
+instance_type = "g6-nanode-1"
+image = "linode/debian13"
+firewall_id = 123
+
+[process]
+container_image = "docker.io/itzg/minecraft-server:latest"
+server_type = "VANILLA"
+version = "LATEST"
+host_port = 25565
+stop_timeout_seconds = 60
+accept_eula = true
+
+[process.environment]
+MEMORY = "1G"
+
+[data]
+backend = "r2_restic"
+"#,
+        )?;
+        assert_eq!(definition.schema_version, 1);
+        assert_eq!(definition.name, "community");
+        Ok(())
     }
 
     #[test]
-    fn rejects_akamai_flags_for_local_compute() {
-        let result = CreateOptions::parse(&[
-            "--name".to_owned(),
-            "local".to_owned(),
-            "--repository".to_owned(),
-            "/tmp/repository".to_owned(),
-            "--accept-eula".to_owned(),
-            "--akamai-region".to_owned(),
-            "jp-tyo-3".to_owned(),
-        ]);
-
-        assert!(matches!(
-            result,
-            Err(CliError::AkamaiFlagsRequireAkamaiCompute)
-        ));
+    fn definition_options_accept_start() -> Result<(), CliError> {
+        let options = DefinitionOptions::parse(&[
+            "--file".to_owned(),
+            "server.toml".to_owned(),
+            "--start".to_owned(),
+        ])?;
+        assert_eq!(options.file, PathBuf::from("server.toml"));
+        assert!(options.start);
+        Ok(())
     }
 }

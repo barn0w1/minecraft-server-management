@@ -633,10 +633,6 @@ def main() -> int:
     database_path = work / "control-plane.db"
     control_log = work / "control-plane.log"
     runtime = work / "fake-runtime"
-    repository = (
-        f"s3:https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/"
-        f"{R2_BUCKET}/remote-e2e/repository"
-    )
     (
         certificate,
         private_key,
@@ -646,10 +642,7 @@ def main() -> int:
     authorized_keys = work / "authorized_keys"
     authorized_keys.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE2Etest remote-e2e\n")
     agent_environment = work / "node-agent.env"
-    agent_environment.write_text(
-        "RESTIC_PASSWORD=remote-provider-e2e\n"
-        "AWS_DEFAULT_REGION=auto\n"
-    )
+    agent_environment.write_text("AWS_DEFAULT_REGION=auto\n")
     api_state = FakeAkamaiState()
     orphan_provider_id = api_state.seed_orphan("remote-e2e")
     api_port = free_tcp_port()
@@ -696,10 +689,10 @@ def main() -> int:
             "MCSERVER_AKAMAI_REQUEST_TIMEOUT_SECONDS": "5",
             "MCSERVER_AKAMAI_REAP_ORPHANS_ON_START": "true",
             "MCSERVER_AKAMAI_LIVE_ENABLED": "true",
-            "MCSERVER_AKAMAI_REGION": AKAMAI_REGION,
-            "MCSERVER_AKAMAI_IMAGE": AKAMAI_IMAGE,
-            "MCSERVER_AKAMAI_FIREWALL_ID": "123",
+            "MCSERVER_AKAMAI_ALLOWED_REGIONS": AKAMAI_REGION,
+            "MCSERVER_AKAMAI_ALLOWED_IMAGES": AKAMAI_IMAGE,
             "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES": "g6-nanode-1",
+            "MCSERVER_AKAMAI_ALLOWED_FIREWALL_IDS": "123",
             "MCSERVER_AKAMAI_MAX_ACTIVE_INSTANCES": "1",
             "MCSERVER_AKAMAI_MAX_INSTANCE_LIFETIME_SECONDS": "3600",
             "MCSERVER_R2_API_TOKEN": "remote-e2e-r2-api-token",
@@ -719,21 +712,6 @@ def main() -> int:
     launched: dict[str, subprocess.Popen[bytes]] = {}
     succeeded = False
     try:
-        init_environment = environment.copy()
-        init_environment.update(
-            {
-                "RESTIC_PASSWORD": "remote-provider-e2e",
-                "AWS_ACCESS_KEY_ID": "initialization-access",
-                "AWS_SECRET_ACCESS_KEY": "initialization-secret",
-                "AWS_SESSION_TOKEN": "initialization-session",
-                "AWS_DEFAULT_REGION": "auto",
-            }
-        )
-        subprocess.run(
-            [str(fake_restic), "--repo", str(repository), "init"],
-            env=init_environment,
-            check=True,
-        )
         with control_log.open("wb") as log:
             process = subprocess.Popen(
                 [str(control_plane)],
@@ -769,11 +747,12 @@ def main() -> int:
                             "accept_eula": True,
                             "environment": {},
                         },
-                        "data": {"repository": repository},
+                        "data": {"backend": "r2_restic"},
                     },
                 },
             )
             server_id = str(server["id"])
+            repository_prefix = f"servers/{server_id}/restic/"
             client.call(
                 "server.set_desired_state",
                 {
@@ -884,7 +863,7 @@ def main() -> int:
                 ]
                 if prefixes.count("mcserver-preflight/") != 1:
                     raise RuntimeError(f"unexpected R2 preflight scopes: {prefixes!r}")
-                if prefixes.count("remote-e2e/repository/") < 2:
+                if prefixes.count(repository_prefix) < 2:
                     raise RuntimeError(f"remote R2 credentials were not prefix-scoped: {prefixes!r}")
                 for request in api_state.requests:
                     if request.get("region") != AKAMAI_REGION:

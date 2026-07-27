@@ -76,6 +76,29 @@ impl ServerRepository {
         row.as_ref().map(decode_server).transpose()
     }
 
+    pub async fn get_by_name(&self, name: &ServerName) -> Result<Option<Server>, RepositoryError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                name,
+                generation,
+                desired_state,
+                spec_json,
+                current_snapshot_id,
+                created_at_ms,
+                updated_at_ms
+            FROM servers
+            WHERE name = ?
+            "#,
+        )
+        .bind(name.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(decode_server).transpose()
+    }
+
     pub async fn list(&self) -> Result<Vec<Server>, RepositoryError> {
         let rows = sqlx::query(
             r#"
@@ -111,6 +134,29 @@ impl ServerRepository {
             "#,
         )
         .bind(server.desired_state.as_str())
+        .bind(generation_to_i64(server.generation)?)
+        .bind(server.updated_at.as_millis())
+        .bind(server.id.to_string())
+        .bind(generation_to_i64(previous_generation)?)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn update_spec(
+        &self,
+        server: &Server,
+        previous_generation: u64,
+    ) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE servers
+            SET spec_json = ?, generation = ?, updated_at_ms = ?
+            WHERE id = ? AND generation = ? AND desired_state = 'stopped'
+            "#,
+        )
+        .bind(serde_json::to_string(&server.spec)?)
         .bind(generation_to_i64(server.generation)?)
         .bind(server.updated_at.as_millis())
         .bind(server.id.to_string())
