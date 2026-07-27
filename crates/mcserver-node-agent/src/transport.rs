@@ -147,7 +147,7 @@ async fn load_connection_token(config: &Config) -> Result<String, TransportError
     match tokio::fs::read_to_string(&path).await {
         Ok(token) => {
             let token = token
-                .trim_end_matches(|character| matches!(character, '\r' | '\n'))
+                .trim_end_matches(['\r', '\n'])
                 .to_owned();
             validate_connection_token(&token)?;
             Ok(token)

@@ -414,9 +414,11 @@ impl AkamaiClient {
         loop {
             let response = self
                 .http
-                .get(format!("{}/linode/instances", self.base_url))
+                .get(format!(
+                    "{}/linode/instances?page={page}&page_size=500",
+                    self.base_url
+                ))
                 .header("X-Filter", &filter)
-                .query(&[("page", page), ("page_size", 500_u64)])
                 .send()
                 .await?;
             let body: ListInstancesResponse = checked_response(response).await?.json().await?;
@@ -445,9 +447,11 @@ impl AkamaiClient {
         loop {
             let response = self
                 .http
-                .get(format!("{}/linode/instances", self.base_url))
+                .get(format!(
+                    "{}/linode/instances?page={page}&page_size=500",
+                    self.base_url
+                ))
                 .header("X-Filter", &filter)
-                .query(&[("page", page), ("page_size", 500_u64)])
                 .send()
                 .await?;
             let body: ListInstancesResponse = checked_response(response).await?.json().await?;

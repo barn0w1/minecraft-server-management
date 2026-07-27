@@ -156,7 +156,7 @@ impl ComputeSpec {
             }) {
                 return Err(ValidationError::InvalidComputeIdentifier {
                     field,
-                    value: value.clone(),
+                    value: value.to_owned(),
                 });
             }
         }
