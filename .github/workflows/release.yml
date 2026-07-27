@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          workspace_version=$(python3 - <<'PY'
+          import tomllib
+          with open("Cargo.toml", "rb") as source:
+              print(tomllib.load(source)["workspace"]["package"]["version"])
+          PY
+          )
+          [[ ${GITHUB_REF_NAME} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          }
+          [[ ${version} == "${workspace_version}" ]] || {
+            echo "tag ${GITHUB_REF_NAME} does not match workspace version ${workspace_version}" >&2
+            exit 1
+          }
+          [[ $(git cat-file -t "${GITHUB_REF_NAME}") == tag ]] || {
+            echo "release tag must be annotated (git tag -a or git tag -s)" >&2
+            exit 1
+          }
+          git fetch --no-tags origin refs/heads/main
+          [[ $(git rev-parse HEAD) == $(git rev-parse FETCH_HEAD) ]] || {
+            echo "release tag must point at the current origin/main commit" >&2
+            exit 1
+          }
+
+      - name: Install static Linux build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang cmake musl-tools ninja-build
+          rustup toolchain install 1.97.1 --profile minimal --target "${TARGET}"
+          rustup default 1.97.1
+
+      - name: Build static release binaries
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: cargo build --locked --release --target "${TARGET}" --workspace
+
+      - name: Verify static linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          for binary in mcserver-control-plane mcserver-node-agent mcserverctl; do
+            path="target/${TARGET}/release/${binary}"
+            file "${path}"
+            if readelf -l "${path}" | grep -q 'INTERP'; then
+              echo "${path} contains a dynamic program interpreter" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run deterministic release binary tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          control="target/${TARGET}/release/mcserver-control-plane"
+          node="target/${TARGET}/release/mcserver-node-agent"
+          python3 scripts/deterministic_e2e.py \
+            --control-plane-binary "${control}" \
+            --node-agent-binary "${node}"
+          python3 scripts/remote_provider_e2e.py \
+            --control-plane-binary "${control}" \
+            --node-agent-binary "${node}"
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          export LC_ALL=C
+          mkdir -p dist/package
+          cat > dist/BUILD-METADATA <<EOF
+          version=${version}
+          git_commit=${GITHUB_SHA}
+          target=${TARGET}
+          rust_toolchain=1.97.1
+          EOF
+          for binary in mcserver-control-plane mcserver-node-agent mcserverctl; do
+            asset="${binary}-v${version}-${TARGET}"
+            install -m0755 "target/${TARGET}/release/${binary}" "dist/${asset}"
+            install -m0755 "target/${TARGET}/release/${binary}" "dist/package/${binary}"
+          done
+          cp README.md SECURITY.md Cargo.lock dist/package/
+          cp dist/BUILD-METADATA dist/package/
+          cp -R deploy docs dist/package/
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          export SOURCE_DATE_EPOCH
+          python3 scripts/generate_spdx_sbom.py \
+            --output dist/SBOM.spdx.json \
+            --name "minecraft-server-management-v${version}" \
+            --namespace "https://github.com/${GITHUB_REPOSITORY}/releases/${GITHUB_REF_NAME}/spdx/${GITHUB_SHA}"
+          cp dist/SBOM.spdx.json dist/package/
+          tar --sort=name \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C dist/package \
+            -czf "dist/minecraft-server-management-v${version}-${TARGET}.tar.gz" .
+          rm -rf dist/package
+          (cd dist && sha256sum BUILD-METADATA SBOM.spdx.json mcserver-* minecraft-server-management-*.tar.gz > SHA256SUMS)
+
+      - name: Smoke test on AlmaLinux 10 and Debian 13
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          node="${PWD}/dist/mcserver-node-agent-v${version}-${TARGET}"
+          control="${PWD}/dist/mcserver-control-plane-v${version}-${TARGET}"
+          cli="${PWD}/dist/mcserverctl-v${version}-${TARGET}"
+          for image in almalinux:10 debian:13-slim; do
+            docker run --rm -v "${node}:/usr/local/bin/mcserver-node-agent:ro" "${image}" \
+              /usr/local/bin/mcserver-node-agent --version
+            docker run --rm -v "${control}:/usr/local/bin/mcserver-control-plane:ro" "${image}" \
+              /usr/local/bin/mcserver-control-plane --version
+            docker run --rm -v "${cli}:/usr/local/bin/mcserverctl:ro" "${image}" \
+              /usr/local/bin/mcserverctl --version
+          done
+
+      - name: Attest release provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist/*
+
+      - name: Attest release SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            dist/mcserver-*-v*-${{ env.TARGET }}
+            dist/minecraft-server-management-v*-${{ env.TARGET }}.tar.gz
+          sbom-path: dist/SBOM.spdx.json
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minecraft-server-management-${{ github.ref_name }}-${{ env.TARGET }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes

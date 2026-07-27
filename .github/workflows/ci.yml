@@ -7,34 +7,51 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install pinned Rust components
-        run: rustup component add rustfmt clippy
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check all targets
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
-      - name: Check Python scripts
-        run: python3 -m py_compile scripts/*.py scripts/fakes/*.py
+      - name: Check scripts and deployment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/*.py scripts/fakes/*.py
+          bash -n deploy/*.sh
+          test_directory=$(mktemp -d)
+          trap 'rm -rf "${test_directory}"' EXIT
+          sed 's#/usr/local/bin/mcserver-control-plane#/usr/bin/true#g' \
+            deploy/systemd/mcserver-control-plane.service \
+            > "${test_directory}/mcserver-control-plane.service"
+          systemd-analyze verify "${test_directory}/mcserver-control-plane.service"
+          systemd-sysusers --dry-run deploy/systemd/mcserver-control-plane.sysusers.conf
 
       - name: Build integration binaries
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Run deterministic local vertical slice
         run: python3 scripts/deterministic_e2e.py
