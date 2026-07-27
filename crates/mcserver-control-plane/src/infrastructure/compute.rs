@@ -39,11 +39,7 @@ impl ComputeManager {
     }
 
     #[must_use]
-    pub fn lifetime_exceeded(
-        &self,
-        compute: &ComputeInstance,
-        now: UnixTimestampMillis,
-    ) -> bool {
+    pub fn lifetime_exceeded(&self, compute: &ComputeInstance, now: UnixTimestampMillis) -> bool {
         match compute.provider {
             ComputeProvider::LocalProcess => false,
             ComputeProvider::Akamai => self

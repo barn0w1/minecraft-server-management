@@ -8,7 +8,10 @@ use std::{collections::BTreeMap, env, error::Error, os::unix::fs::PermissionsExt
 use cancellation::CancellationToken;
 use config::Config;
 use executor::AgentExecutor;
-use tokio::{signal::unix::{SignalKind, signal}, sync::RwLock};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    sync::RwLock,
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 

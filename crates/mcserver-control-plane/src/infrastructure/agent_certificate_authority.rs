@@ -156,9 +156,9 @@ impl AgentCertificateAuthority {
     ) -> Result<SignedAgentCertificate, AgentCertificateError> {
         validate_csr(certificate_signing_request_pem)?;
         ensure_private_directory(&self.work_directory).await?;
-        let request_directory = self
-            .work_directory
-            .join(format!("{}-{}", compute_instance_id, Uuid::new_v4()));
+        let request_directory =
+            self.work_directory
+                .join(format!("{}-{}", compute_instance_id, Uuid::new_v4()));
         ensure_private_directory(&request_directory).await?;
         let result = self
             .sign_in_directory(
@@ -296,7 +296,11 @@ impl AgentCertificateAuthority {
         })
     }
 
-    async fn run(&self, command: &mut Command, description: &'static str) -> Result<Output, AgentCertificateError> {
+    async fn run(
+        &self,
+        command: &mut Command,
+        description: &'static str,
+    ) -> Result<Output, AgentCertificateError> {
         let output = timeout(COMMAND_TIMEOUT, command.output())
             .await
             .map_err(|_| AgentCertificateError::CommandTimeout(description))??;

@@ -214,7 +214,9 @@ impl Config {
         .parse()
         .map_err(ConfigError::InvalidSocketAddress)?;
         if !agent_listen_address.ip().is_loopback() {
-            return Err(ConfigError::AgentAddressMustBeLoopback(agent_listen_address));
+            return Err(ConfigError::AgentAddressMustBeLoopback(
+                agent_listen_address,
+            ));
         }
         if agent_listen_address.port() == 0 {
             return Err(ConfigError::ZeroAgentPort);
@@ -232,7 +234,8 @@ impl Config {
         let podman_binary = env::var_os("MCSERVER_CONTROL_PLANE_PODMAN_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_PODMAN_BINARY));
-        let local_scope = optional_scope("MCSERVER_CONTROL_PLANE_LOCAL_SCOPE", DEFAULT_LOCAL_SCOPE)?;
+        let local_scope =
+            optional_scope("MCSERVER_CONTROL_PLANE_LOCAL_SCOPE", DEFAULT_LOCAL_SCOPE)?;
         let reap_orphans_on_start = parse_bool(
             "MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START",
             DEFAULT_REAP_ORPHANS_ON_START,
@@ -299,14 +302,16 @@ fn remote_agent_config() -> Result<Option<RemoteAgentConfig>, ConfigError> {
     validate_dns_name(&tls_server_name)?;
     let tls_certificate = required_path("MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CERTIFICATE")?;
     let tls_private_key = required_path("MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_PRIVATE_KEY")?;
-    let tls_ca_certificate = required_path("MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CA_CERTIFICATE")?;
+    let tls_ca_certificate =
+        required_path("MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CA_CERTIFICATE")?;
     let client_ca_certificate =
         required_path("MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_CERTIFICATE")?;
     let client_ca_private_key =
         required_path("MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_PRIVATE_KEY")?;
-    let certificate_work_directory = env::var_os("MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_WORK_DIRECTORY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_AGENT_CERTIFICATE_WORK_DIRECTORY));
+    let certificate_work_directory =
+        env::var_os("MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_WORK_DIRECTORY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_AGENT_CERTIFICATE_WORK_DIRECTORY));
     let certificate_validity = parse_positive_duration(
         "MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_VALIDITY_SECONDS",
         DEFAULT_AGENT_CERTIFICATE_VALIDITY_SECONDS,
@@ -330,7 +335,9 @@ fn remote_agent_config() -> Result<Option<RemoteAgentConfig>, ConfigError> {
     let node_agent_sha256 =
         required_non_blank("MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256", SHA256_HEX_CHARS)?;
     if node_agent_sha256.len() != SHA256_HEX_CHARS
-        || !node_agent_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !node_agent_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(ConfigError::InvalidSha256(node_agent_sha256));
     }
@@ -375,14 +382,18 @@ fn reject_partial_remote_config() -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn akamai_config(remote_agent: Option<&RemoteAgentConfig>) -> Result<Option<AkamaiConfig>, ConfigError> {
+fn akamai_config(
+    remote_agent: Option<&RemoteAgentConfig>,
+) -> Result<Option<AkamaiConfig>, ConfigError> {
     let direct_token = optional_string_value("MCSERVER_AKAMAI_API_TOKEN")?;
     let token_file = optional_string_value("MCSERVER_AKAMAI_API_TOKEN_FILE")?;
     let api_token = match (direct_token, token_file) {
-        (Some(_), Some(_)) => return Err(ConfigError::ConflictingSecretSources {
-            direct: "MCSERVER_AKAMAI_API_TOKEN",
-            file: "MCSERVER_AKAMAI_API_TOKEN_FILE",
-        }),
+        (Some(_), Some(_)) => {
+            return Err(ConfigError::ConflictingSecretSources {
+                direct: "MCSERVER_AKAMAI_API_TOKEN",
+                file: "MCSERVER_AKAMAI_API_TOKEN_FILE",
+            });
+        }
         (Some(value), None) => Some(value),
         (None, Some(path)) => Some(read_secret_file(
             "MCSERVER_AKAMAI_API_TOKEN_FILE",
@@ -415,7 +426,8 @@ fn akamai_config(remote_agent: Option<&RemoteAgentConfig>) -> Result<Option<Akam
     if remote_agent.is_none() {
         return Err(ConfigError::RemoteAgentRequiredForAkamai);
     }
-    let api_base_url = optional_string("MCSERVER_AKAMAI_API_BASE_URL", DEFAULT_AKAMAI_API_BASE_URL)?;
+    let api_base_url =
+        optional_string("MCSERVER_AKAMAI_API_BASE_URL", DEFAULT_AKAMAI_API_BASE_URL)?;
     let loopback_api = validate_api_base_url(&api_base_url)?;
     let authorized_keys_file = required_path("MCSERVER_AKAMAI_AUTHORIZED_KEYS_FILE")?;
     let scope = optional_scope("MCSERVER_AKAMAI_SCOPE", DEFAULT_AKAMAI_SCOPE)?;
@@ -450,7 +462,9 @@ fn akamai_config(remote_agent: Option<&RemoteAgentConfig>) -> Result<Option<Akam
     )?;
     let remote_agent = remote_agent.ok_or(ConfigError::RemoteAgentRequiredForAkamai)?;
     let minimum_certificate_validity = max_instance_lifetime
-        .checked_add(Duration::from_secs(AGENT_CERTIFICATE_SHUTDOWN_BUFFER_SECONDS))
+        .checked_add(Duration::from_secs(
+            AGENT_CERTIFICATE_SHUTDOWN_BUFFER_SECONDS,
+        ))
         .ok_or(ConfigError::DurationOutOfRange(
             "MCSERVER_AKAMAI_MAX_INSTANCE_LIFETIME_SECONDS",
         ))?;
@@ -525,17 +539,14 @@ fn r2_config(
     let akamai = akamai.ok_or(ConfigError::AkamaiRequiredForR2)?;
 
     validate_non_blank("MCSERVER_R2_API_TOKEN", &api_token, MAX_SECRET_CHARS)?;
-    let api_base_url = optional_string(
-        "MCSERVER_R2_API_BASE_URL",
-        DEFAULT_CLOUDFLARE_API_BASE_URL,
-    )?;
+    let api_base_url =
+        optional_string("MCSERVER_R2_API_BASE_URL", DEFAULT_CLOUDFLARE_API_BASE_URL)?;
     let loopback_api = validate_r2_api_base_url(&api_base_url)?;
     let account_id = required_non_blank("MCSERVER_R2_ACCOUNT_ID", 32)?;
     if account_id.len() != 32 || !account_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ConfigError::InvalidR2AccountId(account_id));
     }
-    let parent_access_key_id =
-        required_non_blank("MCSERVER_R2_PARENT_ACCESS_KEY_ID", 256)?;
+    let parent_access_key_id = required_non_blank("MCSERVER_R2_PARENT_ACCESS_KEY_ID", 256)?;
     let bucket = required_non_blank("MCSERVER_R2_BUCKET", 63)?;
     validate_r2_bucket_name(&bucket)?;
     let temporary_credential_ttl = parse_positive_duration(
@@ -717,7 +728,10 @@ fn optional_identifier(
     Ok(value)
 }
 
-fn parse_identifier_set(name: &'static str, default: &str) -> Result<BTreeSet<String>, ConfigError> {
+fn parse_identifier_set(
+    name: &'static str,
+    default: &str,
+) -> Result<BTreeSet<String>, ConfigError> {
     let raw = optional_string(name, default)?;
     let values = raw
         .split(',')
@@ -733,9 +747,9 @@ fn parse_identifier_set(name: &'static str, default: &str) -> Result<BTreeSet<St
 
 fn is_provider_identifier(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'/' | b'.')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'/' | b'.'))
 }
 
 fn validate_host_port(value: &str) -> Result<(), ConfigError> {
@@ -858,9 +872,9 @@ fn validate_r2_bucket_name(value: &str) -> Result<(), ConfigError> {
     let valid = (3..=63).contains(&bytes.len())
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
         && !value.contains("..")
         && !value.contains(".-")
         && !value.contains("-.");
@@ -921,7 +935,11 @@ fn parse_positive_usize(name: &'static str, default: usize) -> Result<usize, Con
     let value = match env::var(name) {
         Ok(value) => value
             .parse()
-            .map_err(|source| ConfigError::InvalidInteger { name, value, source })?,
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };
@@ -935,7 +953,11 @@ fn parse_required_positive_u64(name: &'static str) -> Result<u64, ConfigError> {
     let value = required_non_blank(name, 32)?;
     let parsed = value
         .parse::<u64>()
-        .map_err(|source| ConfigError::InvalidInteger { name, value, source })?;
+        .map_err(|source| ConfigError::InvalidInteger {
+            name,
+            value,
+            source,
+        })?;
     if parsed == 0 {
         return Err(ConfigError::ZeroValue(name));
     }
@@ -946,7 +968,11 @@ fn parse_positive_duration(name: &'static str, default: u64) -> Result<Duration,
     let seconds = match env::var(name) {
         Ok(value) => value
             .parse()
-            .map_err(|source| ConfigError::InvalidInteger { name, value, source })?,
+            .map_err(|source| ConfigError::InvalidInteger {
+                name,
+                value,
+                source,
+            })?,
         Err(env::VarError::NotPresent) => default,
         Err(source) => return Err(ConfigError::Environment { name, source }),
     };
@@ -1024,7 +1050,10 @@ pub enum ConfigError {
     #[error("R2 settings require MCSERVER_R2_API_TOKEN or MCSERVER_R2_API_TOKEN_FILE")]
     R2TokenRequired,
     #[error("both {direct} and {file} were configured; choose one secret source")]
-    ConflictingSecretSources { direct: &'static str, file: &'static str },
+    ConflictingSecretSources {
+        direct: &'static str,
+        file: &'static str,
+    },
     #[error("failed to read secret file {path} configured by {name}")]
     SecretFile {
         name: &'static str,
@@ -1107,7 +1136,9 @@ mod tests {
 
     #[test]
     fn remote_download_requires_structurally_valid_https() {
-        assert!(validate_https_url("TEST", "https://downloads.example.com/agent?version=1").is_ok());
+        assert!(
+            validate_https_url("TEST", "https://downloads.example.com/agent?version=1").is_ok()
+        );
         assert!(validate_https_url("TEST", "http://downloads.example.com/agent").is_err());
         assert!(validate_https_url("TEST", "https:///missing-host").is_err());
         assert!(validate_https_url("TEST", "https://user:secret@example.com/agent").is_err());
@@ -1115,18 +1146,9 @@ mod tests {
 
     #[test]
     fn akamai_api_allows_http_only_for_loopback_tests() {
-        assert!(
-            validate_api_base_url("https://api.linode.com/v4")
-                .is_ok_and(|loopback| !loopback)
-        );
-        assert!(
-            validate_api_base_url("http://127.0.0.1:3000/v4")
-                .is_ok_and(|loopback| loopback)
-        );
-        assert!(
-            validate_api_base_url("http://[::1]:3000/v4")
-                .is_ok_and(|loopback| loopback)
-        );
+        assert!(validate_api_base_url("https://api.linode.com/v4").is_ok_and(|loopback| !loopback));
+        assert!(validate_api_base_url("http://127.0.0.1:3000/v4").is_ok_and(|loopback| loopback));
+        assert!(validate_api_base_url("http://[::1]:3000/v4").is_ok_and(|loopback| loopback));
         assert!(validate_api_base_url("http://localhost.evil.example/v4").is_err());
         assert!(validate_api_base_url("https://api.linode.com/v4?token=secret").is_err());
     }

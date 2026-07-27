@@ -89,9 +89,7 @@ impl AkamaiComputeManager {
         for instance_type in &self.config.allowed_instance_types {
             self.client.verify_instance_type(instance_type).await?;
         }
-        self.client
-            .verify_firewall(self.config.firewall_id)
-            .await?;
+        self.client.verify_firewall(self.config.firewall_id).await?;
         let managed_instances = self
             .client
             .list_managed_instances(&self.config.scope)
@@ -107,17 +105,15 @@ impl AkamaiComputeManager {
     }
 
     #[must_use]
-    pub fn lifetime_exceeded(
-        &self,
-        compute: &ComputeInstance,
-        now: UnixTimestampMillis,
-    ) -> bool {
+    pub fn lifetime_exceeded(&self, compute: &ComputeInstance, now: UnixTimestampMillis) -> bool {
         if compute.provider != ComputeProvider::Akamai {
             return false;
         }
-        let maximum_millis = i64::try_from(self.config.max_instance_lifetime.as_millis())
-            .unwrap_or(i64::MAX);
-        now.as_millis().saturating_sub(compute.created_at.as_millis()) >= maximum_millis
+        let maximum_millis =
+            i64::try_from(self.config.max_instance_lifetime.as_millis()).unwrap_or(i64::MAX);
+        now.as_millis()
+            .saturating_sub(compute.created_at.as_millis())
+            >= maximum_millis
     }
 
     fn require_live_operations_enabled(&self) -> Result<(), AkamaiComputeError> {
@@ -726,7 +722,11 @@ impl AkamaiClient {
             .send()
             .await?;
         let firewalls: ListFirewallsResponse = checked_response(response).await?.json().await?;
-        let Some(firewall) = firewalls.data.into_iter().find(|value| value.id == firewall_id) else {
+        let Some(firewall) = firewalls
+            .data
+            .into_iter()
+            .find(|value| value.id == firewall_id)
+        else {
             return Err(AkamaiComputeError::RequiredFirewallMissing {
                 provider_instance_id,
                 firewall_id,
@@ -990,7 +990,9 @@ impl AkamaiComputeError {
 pub enum AkamaiComputeError {
     #[error("Akamai provider used for a non-Akamai compute specification")]
     WrongProvider,
-    #[error("billable Akamai creation and startup orphan reaping are disabled; set MCSERVER_AKAMAI_LIVE_ENABLED=true after preflight")]
+    #[error(
+        "billable Akamai creation and startup orphan reaping are disabled; set MCSERVER_AKAMAI_LIVE_ENABLED=true after preflight"
+    )]
     LiveOperationsDisabled,
     #[error("Akamai region {requested} is not allowed; configured region is {allowed}")]
     RegionNotAllowed { requested: String, allowed: String },
@@ -999,10 +1001,15 @@ pub enum AkamaiComputeError {
     #[error("Akamai instance type is not allowed: {0}")]
     InstanceTypeNotAllowed(String),
     #[error("Akamai firewall {requested:?} is not allowed; required firewall is {required}")]
-    FirewallNotAllowed { requested: Option<u64>, required: u64 },
+    FirewallNotAllowed {
+        requested: Option<u64>,
+        required: u64,
+    },
     #[error("Akamai managed instance limit is already reached: active={active}, maximum={maximum}")]
     ActiveInstanceLimitReached { active: usize, maximum: usize },
-    #[error("Akamai managed instance count exceeds the configured limit: active={active}, maximum={maximum}")]
+    #[error(
+        "Akamai managed instance count exceeds the configured limit: active={active}, maximum={maximum}"
+    )]
     ActiveInstanceLimitExceeded { active: usize, maximum: usize },
     #[error("active compute instance was created concurrently")]
     CreateConflict,
@@ -1033,13 +1040,17 @@ pub enum AkamaiComputeError {
         expected_image: String,
         observed_image: String,
     },
-    #[error("Akamai instance type response identity mismatch: expected {expected}, observed {observed}")]
+    #[error(
+        "Akamai instance type response identity mismatch: expected {expected}, observed {observed}"
+    )]
     InstanceTypeIdentityMismatch { expected: String, observed: String },
     #[error("Akamai firewall response identity mismatch: expected {expected}, observed {observed}")]
     FirewallIdentityMismatch { expected: u64, observed: u64 },
     #[error("Akamai firewall {firewall_id} is not enabled; status={status}")]
     FirewallDisabled { firewall_id: u64, status: String },
-    #[error("Akamai instance {provider_instance_id} is not attached to required firewall {firewall_id}")]
+    #[error(
+        "Akamai instance {provider_instance_id} is not attached to required firewall {firewall_id}"
+    )]
     RequiredFirewallMissing {
         provider_instance_id: u64,
         firewall_id: u64,

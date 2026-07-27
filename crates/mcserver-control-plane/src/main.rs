@@ -1,16 +1,14 @@
 use std::{env, error::Error, fmt::Display, time::Duration};
 
 use mcserver_control_plane::{
-    agent::{
-        AgentRegistry, AgentServer, AgentServerError, TlsAgentServer, TlsAgentServerOptions,
-    },
+    agent::{AgentRegistry, AgentServer, AgentServerError, TlsAgentServer, TlsAgentServerOptions},
     application::{ServerInstanceService, ServerService, ServerStatusService},
     config::Config,
     infrastructure::{
         AgentCertificateAuthority, AgentCertificateError, AkamaiComputeManager, ComputeError,
-        ComputeInstanceRepository, ComputeManager, LocalComputeManager,
-        R2TemporaryCredentialError, R2TemporaryCredentialManager, ServerInstanceRepository,
-        ServerRepository, SnapshotRepository, connect_database,
+        ComputeInstanceRepository, ComputeManager, LocalComputeManager, R2TemporaryCredentialError,
+        R2TemporaryCredentialManager, ServerInstanceRepository, ServerRepository,
+        SnapshotRepository, connect_database,
     },
     interface::{ClientRpcHandler, UnixSocketError, UnixSocketServer},
     reconciliation::{ReconcileFatalError, ReconcileWorker},
@@ -282,11 +280,11 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
                 certificate_path: remote.tls_certificate.clone(),
                 private_key_path: remote.tls_private_key.clone(),
                 client_ca_certificate_path: remote.client_ca_certificate.clone(),
-                certificate_authority: remote_certificate_authority
-                    .clone()
-                    .ok_or_else(|| ControlPlaneError::InvalidConfiguration(
+                certificate_authority: remote_certificate_authority.clone().ok_or_else(|| {
+                    ControlPlaneError::InvalidConfiguration(
                         "remote agent certificate authority is unavailable".to_owned(),
-                    ))?,
+                    )
+                })?,
                 r2_credentials,
                 registry: agents.clone(),
                 compute_repository: compute_repository.clone(),

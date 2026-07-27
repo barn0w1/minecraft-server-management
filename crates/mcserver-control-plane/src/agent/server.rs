@@ -184,7 +184,13 @@ impl TlsAgentServer {
     }
 
     pub async fn run(self, cancellation: CancellationToken) -> Result<(), AgentServerError> {
-        run_listener(self.listener, self.context, Some(self.acceptor), cancellation).await?;
+        run_listener(
+            self.listener,
+            self.context,
+            Some(self.acceptor),
+            cancellation,
+        )
+        .await?;
         info!("remote mTLS node-agent listener stopped");
         Ok(())
     }
@@ -313,7 +319,8 @@ async fn handle_connection(
             return Ok(());
         }
     };
-    if !validate_protocol_version(params.protocol_version, &mut writer, response_id.clone()).await? {
+    if !validate_protocol_version(params.protocol_version, &mut writer, response_id.clone()).await?
+    {
         return Ok(());
     }
     if context.expected_provider == ComputeProvider::Akamai && peer_certificate_der.is_none() {
@@ -374,7 +381,10 @@ async fn handle_connection(
 
     let session_id = Uuid::new_v4();
     let (sender, receiver) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-    context.registry.register(compute_id, session_id, sender).await;
+    context
+        .registry
+        .register(compute_id, session_id, sender)
+        .await;
     context
         .reconcile_scheduler
         .enqueue_best_effort_for_instance(compute.server_instance_id);
@@ -469,10 +479,10 @@ where
             }
         }
         (None, None, None, None) => {
-            let certificate_authority = context
-                .certificate_authority
-                .as_ref()
-                .ok_or_else(|| AgentServerError::Protocol("certificate authority unavailable".to_owned()))?;
+            let certificate_authority =
+                context.certificate_authority.as_ref().ok_or_else(|| {
+                    AgentServerError::Protocol("certificate authority unavailable".to_owned())
+                })?;
             let issued_at = context.clock.now()?;
             let signed = certificate_authority
                 .sign(
@@ -518,9 +528,9 @@ where
                     return Ok(());
                 }
                 EnrollResult {
-                    client_certificate_chain_pem: existing
-                        .certificate_chain_pem
-                        .ok_or_else(|| AgentServerError::Protocol("incomplete enrollment state".to_owned()))?,
+                    client_certificate_chain_pem: existing.certificate_chain_pem.ok_or_else(
+                        || AgentServerError::Protocol("incomplete enrollment state".to_owned()),
+                    )?,
                     connection_token: existing.connection_token,
                 }
             }
@@ -549,7 +559,10 @@ where
             writer,
             &Response::error(
                 Value::Null,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+                ErrorObject::new(
+                    json_rpc::error_code::INVALID_REQUEST,
+                    "Invalid registration",
+                ),
             ),
         )
         .await?;
@@ -598,8 +611,11 @@ where
         writer,
         &Response::error(
             id,
-            ErrorObject::new(json_rpc::error_code::INVALID_PARAMS, "Invalid registration params")
-                .with_data(json!({ "detail": error.to_string() })),
+            ErrorObject::new(
+                json_rpc::error_code::INVALID_PARAMS,
+                "Invalid registration params",
+            )
+            .with_data(json!({ "detail": error.to_string() })),
         ),
     )
     .await

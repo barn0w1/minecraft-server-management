@@ -45,11 +45,7 @@ impl R2TemporaryCredentialManager {
         &self,
         repository: &str,
     ) -> Result<BTreeMap<String, String>, R2TemporaryCredentialError> {
-        let prefix = repository_prefix(
-            repository,
-            &self.config.account_id,
-            &self.config.bucket,
-        )?;
+        let prefix = repository_prefix(repository, &self.config.account_id, &self.config.bucket)?;
         let credentials = self
             .issue(&prefix, self.config.temporary_credential_ttl)
             .await?;
@@ -120,10 +116,7 @@ impl R2TemporaryCredentialManager {
             .ok_or(R2TemporaryCredentialError::MissingResult)?;
         let credentials = R2TemporaryCredentials {
             access_key_id: required_credential("accessKeyId", result.access_key_id)?,
-            secret_access_key: required_credential(
-                "secretAccessKey",
-                result.secret_access_key,
-            )?,
+            secret_access_key: required_credential("secretAccessKey", result.secret_access_key)?,
             session_token: required_credential("sessionToken", result.session_token)?,
         };
         Ok(credentials)
@@ -175,7 +168,9 @@ fn required_credential(
     value: Option<String>,
 ) -> Result<String, R2TemporaryCredentialError> {
     let value = value.ok_or(R2TemporaryCredentialError::MissingCredentialField(field))?;
-    if value.trim().is_empty() || value.contains('\0') || value.chars().count() > MAX_CREDENTIAL_CHARS
+    if value.trim().is_empty()
+        || value.contains('\0')
+        || value.chars().count() > MAX_CREDENTIAL_CHARS
     {
         return Err(R2TemporaryCredentialError::InvalidCredentialField(field));
     }
@@ -241,9 +236,9 @@ fn is_safe_prefix_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn validate_prefix(value: &str) -> Result<(), R2TemporaryCredentialError> {
@@ -270,7 +265,9 @@ pub enum R2TemporaryCredentialError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Cloudflare API rejected the temporary credential request with status {status}: {errors:?}")]
+    #[error(
+        "Cloudflare API rejected the temporary credential request with status {status}: {errors:?}"
+    )]
     Api {
         status: StatusCode,
         errors: Vec<CloudflareApiError>,
