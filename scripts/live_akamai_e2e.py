@@ -100,7 +100,7 @@ def set_desired_state(
     return client.call(
         "server.set_desired_state",
         {
-            "server_id": server["id"],
+            "server_name": server["name"],
             "desired_state": desired_state,
             "expected_generation": server["generation"],
         },
@@ -109,13 +109,13 @@ def set_desired_state(
 
 def wait_for_remote_running(
     client: local.JsonRpcClient,
-    server_id: str,
+    server_name: str,
     previous_instance_id: str | None,
     deadline: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     last_status: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        status = client.call("server.status", {"server_id": server_id})
+        status = client.call("server.status", {"server_name": server_name})
         last_status = status
         instance = status.get("active_instance")
         compute = status.get("active_compute")
@@ -139,11 +139,11 @@ def wait_for_remote_running(
 
 
 def wait_for_absent_compute(
-    client: local.JsonRpcClient, server_id: str, deadline: float
+    client: local.JsonRpcClient, server_name: str, deadline: float
 ) -> None:
     last_status: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        status = client.call("server.status", {"server_id": server_id})
+        status = client.call("server.status", {"server_name": server_name})
         last_status = status
         if status.get("active_instance") is None and status.get("active_compute") is None:
             return
@@ -182,7 +182,7 @@ def run_generation(
     server = set_desired_state(client, server, "running")
     deadline = time.monotonic() + timeout_seconds
     instance, compute = wait_for_remote_running(
-        client, str(server["id"]), previous_instance_id, deadline
+        client, str(server["name"]), previous_instance_id, deadline
     )
     if instance.get("source_snapshot_id") != expected_source_snapshot:
         raise local.RpcError(
@@ -210,10 +210,10 @@ def run_generation(
     server = set_desired_state(client, server, "stopped")
     stop_deadline = time.monotonic() + timeout_seconds
     completed = local.wait_for_completed_instance(
-        client, str(server["id"]), str(instance["id"]), stop_deadline
+        client, str(server["name"]), str(instance["id"]), stop_deadline
     )
-    wait_for_absent_compute(client, str(server["id"]), stop_deadline)
-    server = client.call("server.get", {"server_id": server["id"]})
+    wait_for_absent_compute(client, str(server["name"]), stop_deadline)
+    server = client.call("server.get", {"server_name": server["name"]})
     snapshot = completed.get("result_snapshot_id")
     if not snapshot or server.get("current_snapshot_id") != snapshot:
         raise local.RpcError(
@@ -233,16 +233,16 @@ def cleanup(
     cleanup_timeout_seconds: float,
 ) -> None:
     try:
-        current = client.call("server.get", {"server_id": server["id"]})
+        current = client.call("server.get", {"server_name": server["name"]})
         if current["desired_state"] != "stopped":
             current = set_desired_state(client, current, "stopped")
         deadline = time.monotonic() + cleanup_timeout_seconds
-        active = local.active_instance(client, str(current["id"]))
+        active = local.active_instance(client, str(current["name"]))
         if active is not None:
             local.wait_for_completed_instance(
-                client, str(current["id"]), str(active["id"]), deadline
+                client, str(current["name"]), str(active["id"]), deadline
             )
-        wait_for_absent_compute(client, str(current["id"]), deadline)
+        wait_for_absent_compute(client, str(current["name"]), deadline)
     except (OSError, local.RpcError, TimeoutError) as error:
         print(f"cleanup warning: {error}", file=sys.stderr)
 
@@ -307,18 +307,30 @@ def main() -> int:
         )
         if int(second["fencing_token"]) <= int(first["fencing_token"]):
             raise local.RpcError("fencing token did not increase")
-        final_status = client.call("server.status", {"server_id": server["id"]})
+        final_status = client.call("server.status", {"server_name": server["name"]})
         if final_status.get("active_instance") is not None or final_status.get(
             "active_compute"
         ) is not None:
             raise local.RpcError(f"final resource state is not empty: {final_status!r}")
+        server = client.call(
+            "server.archive",
+            {
+                "server_name": server["name"],
+                "expected_generation": server["generation"],
+            },
+        )
+        if server.get("archived_at_ms") is None:
+            raise local.RpcError(f"acceptance server was not archived: {server!r}")
 
         print(
             "live Akamai production checkpoint passed: mTLS enrollment, two VM "
             "generations, restore, start, stop, snapshot publication, and provider "
             "cleanup all succeeded"
         )
-        print(f"stopped Server record retained for audit: {server['id']}")
+        print(
+            f"archived Server record and R2 repository retained: "
+            f"name={server['name']} id={server['id']}"
+        )
         succeeded = True
         return 0
     finally:

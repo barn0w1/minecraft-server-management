@@ -12,14 +12,15 @@ plugin、world、`server.properties` の内容は解釈しません。
 
 利用者が管理する永続 resource です。
 
-- 一意な名前と UUID
+- 外部操作に使う一意な DNS-label形式の名前と、内部参照用 UUID
 - `running` / `stopped` の desired state
 - Akamai compute、Minecraft process、storage の設定
 - 現在の authoritative snapshot
 - optimistic concurrency 用の `generation`
 
 `server.apply` は名前で upsert します。定義変更は停止中だけ許可され、storage backend
-と自動割当済み R2 repository は不変です。
+と自動割当済み R2 repository は不変です。停止完了後の `server.archive` は Server を
+通常一覧と reconcile 対象から外しますが、名前、履歴、snapshot、R2 object は削除しません。
 
 ### ServerInstance
 
@@ -69,8 +70,12 @@ process restart から復旧します。各 reconcile は小さな idempotent op
 R2 を選んだ Server の repository は control plane が次の形式で決定します。
 
 ```text
-s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/servers/<SERVER_UUID>/restic
+s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/servers/<SERVER_NAME>/restic
 ```
+
+bucket は control plane 全体で1つだけ設定し、Server定義からは変更できません。Server name
+は bucket prefix として安全な1〜63文字の小文字DNS labelに制限し、アーカイブ後も再利用
+しません。
 
 node agent は `restic cat config` で存在確認し、未作成なら `restic init` を実行します。
 すべての restic command は `--insecure-no-password` を使用します。

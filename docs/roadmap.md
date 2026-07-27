@@ -1,6 +1,6 @@
 # 現在の状態と今後
 
-## v0.2.0
+## v0.3.0
 
 本番の基本 lifecycle は完成しています。
 
@@ -8,6 +8,10 @@
 - Server ごとの Akamai compute と Minecraft process 設定
 - global Akamai allowlist と active instance 上限
 - Server ごとの R2 prefix と restic repository 自動初期化
+- 一意なDNS-label形式のServer nameをすべてのoperator操作に使用
+- 単一のglobal R2 bucketと `servers/<name>/restic` の自動割当
+- R2データを削除しないServer archive
+- `/etc`、`/var/lib`、`/run`を使う標準Linux配置
 - passwordless restic
 - prefix-scoped R2 temporary credentials
 - one-time enrollment と mTLS node agent

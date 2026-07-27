@@ -28,9 +28,10 @@ impl ServerRepository {
                 desired_state,
                 spec_json,
                 current_snapshot_id,
+                archived_at_ms,
                 created_at_ms,
                 updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(server.id.to_string())
@@ -39,6 +40,7 @@ impl ServerRepository {
         .bind(server.desired_state.as_str())
         .bind(spec_json)
         .bind(server.current_snapshot_id.as_deref())
+        .bind(server.archived_at.map(UnixTimestampMillis::as_millis))
         .bind(server.created_at.as_millis())
         .bind(server.updated_at.as_millis())
         .execute(&self.pool)
@@ -63,6 +65,7 @@ impl ServerRepository {
                 desired_state,
                 spec_json,
                 current_snapshot_id,
+                archived_at_ms,
                 created_at_ms,
                 updated_at_ms
             FROM servers
@@ -86,6 +89,7 @@ impl ServerRepository {
                 desired_state,
                 spec_json,
                 current_snapshot_id,
+                archived_at_ms,
                 created_at_ms,
                 updated_at_ms
             FROM servers
@@ -99,7 +103,7 @@ impl ServerRepository {
         row.as_ref().map(decode_server).transpose()
     }
 
-    pub async fn list(&self) -> Result<Vec<Server>, RepositoryError> {
+    pub async fn list(&self, include_archived: bool) -> Result<Vec<Server>, RepositoryError> {
         let rows = sqlx::query(
             r#"
             SELECT
@@ -109,16 +113,40 @@ impl ServerRepository {
                 desired_state,
                 spec_json,
                 current_snapshot_id,
+                archived_at_ms,
                 created_at_ms,
                 updated_at_ms
             FROM servers
+            WHERE archived_at_ms IS NULL OR ?
             ORDER BY name, id
             "#,
         )
+        .bind(include_archived)
         .fetch_all(&self.pool)
         .await?;
 
         rows.iter().map(decode_server).collect()
+    }
+
+    pub async fn list_for_reconciliation(&self) -> Result<Vec<Server>, RepositoryError> {
+        self.list(false).await
+    }
+
+    pub async fn has_active_instance(&self, id: ServerId) -> Result<bool, RepositoryError> {
+        let active = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM server_instances
+                WHERE server_id = ?
+                  AND terminated_at_ms IS NULL
+            )
+            "#,
+        )
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
     }
 
     pub async fn update_desired_state(
@@ -130,7 +158,7 @@ impl ServerRepository {
             r#"
             UPDATE servers
             SET desired_state = ?, generation = ?, updated_at_ms = ?
-            WHERE id = ? AND generation = ?
+            WHERE id = ? AND generation = ? AND archived_at_ms IS NULL
             "#,
         )
         .bind(server.desired_state.as_str())
@@ -153,10 +181,48 @@ impl ServerRepository {
             r#"
             UPDATE servers
             SET spec_json = ?, generation = ?, updated_at_ms = ?
-            WHERE id = ? AND generation = ? AND desired_state = 'stopped'
+            WHERE id = ?
+              AND generation = ?
+              AND desired_state = 'stopped'
+              AND archived_at_ms IS NULL
             "#,
         )
         .bind(serde_json::to_string(&server.spec)?)
+        .bind(generation_to_i64(server.generation)?)
+        .bind(server.updated_at.as_millis())
+        .bind(server.id.to_string())
+        .bind(generation_to_i64(previous_generation)?)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn archive(
+        &self,
+        server: &Server,
+        previous_generation: u64,
+    ) -> Result<bool, RepositoryError> {
+        let archived_at = server
+            .archived_at
+            .ok_or(RepositoryError::InvalidArchiveState)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE servers
+            SET archived_at_ms = ?, generation = ?, updated_at_ms = ?
+            WHERE id = ?
+              AND generation = ?
+              AND desired_state = 'stopped'
+              AND archived_at_ms IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM server_instances
+                  WHERE server_id = servers.id
+                    AND terminated_at_ms IS NULL
+              )
+            "#,
+        )
+        .bind(archived_at.as_millis())
         .bind(generation_to_i64(server.generation)?)
         .bind(server.updated_at.as_millis())
         .bind(server.id.to_string())
@@ -175,6 +241,10 @@ fn decode_server(row: &SqliteRow) -> Result<Server, RepositoryError> {
     let desired_state = DesiredState::parse(&row.try_get::<String, _>("desired_state")?)?;
     let spec = serde_json::from_str::<ServerSpec>(&row.try_get::<String, _>("spec_json")?)?;
     let current_snapshot_id = row.try_get("current_snapshot_id")?;
+    let archived_at = row
+        .try_get::<Option<i64>, _>("archived_at_ms")?
+        .map(decode_timestamp)
+        .transpose()?;
     let created_at = decode_timestamp(row.try_get("created_at_ms")?)?;
     let updated_at = decode_timestamp(row.try_get("updated_at_ms")?)?;
 
@@ -185,6 +255,7 @@ fn decode_server(row: &SqliteRow) -> Result<Server, RepositoryError> {
         desired_state,
         spec,
         current_snapshot_id,
+        archived_at,
         created_at,
         updated_at,
     )
@@ -247,4 +318,67 @@ pub enum RepositoryError {
     IntegerOutOfRange,
     #[error("resource conflict: {0}")]
     Conflict(&'static str),
+    #[error("server repository received a non-archived server for archive persistence")]
+    InvalidArchiveState,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        domain::{ComputeSpec, DataBackend, DataSpec, ProcessSpec, ServerSpec},
+        infrastructure::connect_database,
+    };
+
+    use super::*;
+
+    fn valid_spec() -> ServerSpec {
+        ServerSpec {
+            compute: ComputeSpec::Local,
+            process: ProcessSpec {
+                container_image: "docker.io/itzg/minecraft-server:latest".to_owned(),
+                server_type: "VANILLA".to_owned(),
+                version: "LATEST".to_owned(),
+                host_port: 25_565,
+                stop_timeout_seconds: 30,
+                accept_eula: true,
+                environment: BTreeMap::new(),
+            },
+            data: DataSpec {
+                backend: DataBackend::LocalRestic,
+                repository: "/tmp/community-restic".to_owned(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn archived_server_is_hidden_but_name_remains_reserved()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            std::env::temp_dir().join(format!("mcserver-repository-{}.db", Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", database_path.display());
+        let pool = connect_database(&database_url).await?;
+        let repository = ServerRepository::new(pool.clone());
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let name = ServerName::new("community")?;
+        let mut server = Server::new(ServerId::new(), name.clone(), valid_spec(), now)?;
+        repository.create(&server).await?;
+
+        let previous_generation = server.generation;
+        server.archive(UnixTimestampMillis::from_millis(2_000)?)?;
+        assert!(repository.archive(&server, previous_generation).await?);
+        assert!(repository.list(false).await?.is_empty());
+        assert_eq!(repository.list(true).await?, vec![server.clone()]);
+
+        let replacement = Server::new(ServerId::new(), name, valid_spec(), now)?;
+        assert!(matches!(
+            repository.create(&replacement).await,
+            Err(RepositoryError::Conflict(_))
+        ));
+
+        pool.close().await;
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
 }

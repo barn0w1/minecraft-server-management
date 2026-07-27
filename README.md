@@ -7,14 +7,16 @@ Minecraft の実行中だけ VM を保持します。停止要求を受けると
 `/data` 全体を restic snapshot として R2 に保存してから VM を削除します。次回は最新
 snapshot を新しい VM へ復元します。
 
-## v0.2.0 の運用モデル
+## v0.3.0 の運用モデル
 
 - `Server` ごとに Akamai の region、instance type、image、firewall、Minecraft 設定を管理
+- Server name は小文字英数字とハイフンからなる一意な DNS label（1〜63文字）
 - server 定義は TOML ファイルで宣言し、`mcserverctl server apply` で作成・更新
-- R2 の保存先は `servers/<Server UUID>/restic` として自動割当
+- R2 bucket は control plane 全体で1つ、保存先は `servers/<server-name>/restic` として自動割当
 - restic repository は初回起動時に自動作成
 - restic は `--insecure-no-password` を常に使用し、パスワードを保管しない
 - 一時 VM へ渡す R2 credential は、その server の prefix のみに制限された短期 credential
+- Server は削除せずアーカイブし、名前、履歴、R2データを永久に保持
 - global 設定は利用可能な Akamai resource の allowlist と同時実行上限だけを保持
 - node agent は mTLS で control plane へ接続し、VM 側に長期 cloud credential を保存しない
 - Certbot の更新 hook が証明書を検証して反映し、異常時は直前の証明書へ戻す
@@ -63,5 +65,6 @@ resource を作成しません。実際の Akamai VM を使う acceptance は
 - `/data` 内のファイルを control plane は解釈・編集しません。
 - 稼働中の server 定義は変更できません。停止完了後に `server apply` します。
 - storage backend と repository は Server 作成後に変更できません。
+- アーカイブは停止完了後だけ可能です。アーカイブはR2 objectを削除しません。
 - SQLite は desired state と監査履歴の正本、停止済み snapshot は R2 がデータの正本です。
 - Discord bot や Web UI は Unix socket の client API を利用する別 client として実装します。

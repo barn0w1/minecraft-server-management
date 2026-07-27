@@ -153,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--report",
         type=Path,
-        default=Path("mcserver-production-report.json"),
+        default=Path("/var/lib/mcserver-deploy/production-report.json"),
         help="secret-free JSON result report",
     )
     parser.add_argument(
@@ -744,6 +744,11 @@ def render_environment(config: Config, node_digest: str, live: bool) -> str:
 
 
 def install_file(source: Path, destination: str, mode: str, group: str) -> None:
+    destination_path = Path(destination)
+    if source.resolve() == destination_path.resolve():
+        run(["chown", f"root:{group}", "--", destination])
+        run(["chmod", mode, "--", destination])
+        return
     run(
         [
             "install",

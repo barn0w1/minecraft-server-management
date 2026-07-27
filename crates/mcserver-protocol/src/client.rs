@@ -11,6 +11,7 @@ pub mod method {
     pub const SERVER_LIST: &str = "server.list";
     pub const SERVER_STATUS: &str = "server.status";
     pub const SERVER_SET_DESIRED_STATE: &str = "server.set_desired_state";
+    pub const SERVER_ARCHIVE: &str = "server.archive";
     pub const SERVER_INSTANCE_GET: &str = "server_instance.get";
     pub const SERVER_INSTANCE_LIST: &str = "server_instance.list";
 }
@@ -122,13 +123,26 @@ pub struct ApplyServerParams {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GetServerParams {
-    pub server_id: Uuid,
+    pub server_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ListServersParams {
+    #[serde(default)]
+    pub include_archived: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetServerDesiredStateParams {
-    pub server_id: Uuid,
+    pub server_name: String,
     pub desired_state: DesiredState,
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchiveServerParams {
+    pub server_name: String,
     #[serde(default)]
     pub expected_generation: Option<u64>,
 }
@@ -140,7 +154,7 @@ pub struct GetServerInstanceParams {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListServerInstancesParams {
-    pub server_id: Uuid,
+    pub server_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +172,7 @@ pub struct ServerResource {
     pub spec: ServerSpec,
     pub created_at_ms: i64,
     pub current_snapshot_id: Option<String>,
+    pub archived_at_ms: Option<i64>,
     pub updated_at_ms: i64,
 }
 

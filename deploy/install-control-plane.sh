@@ -20,6 +20,36 @@ cli=$(realpath -- "${cli_candidate}")
 "${cli}" --version
 install -Dm0755 -- "${binary}" /usr/local/bin/mcserver-control-plane
 install -Dm0755 -- "${cli}" /usr/local/bin/mcserverctl
+install -Dm0755 -- \
+  "${repository_root}/deploy/production_deploy.py" \
+  /usr/local/libexec/mcserver/deploy/production_deploy.py
+install -Dm0755 -- \
+  "${repository_root}/deploy/prepare-control-plane-host.sh" \
+  /usr/local/libexec/mcserver/deploy/prepare-control-plane-host.sh
+install -Dm0755 -- \
+  "${repository_root}/deploy/generate-agent-client-ca.sh" \
+  /usr/local/libexec/mcserver/deploy/generate-agent-client-ca.sh
+install -Dm0644 -- \
+  "${repository_root}/deploy/production-deploy.toml.example" \
+  /usr/local/libexec/mcserver/deploy/production-deploy.toml.example
+install -Dm0644 -- \
+  "${repository_root}/deploy/systemd/mcserver-control-plane.sysusers.conf" \
+  /usr/local/libexec/mcserver/deploy/systemd/mcserver-control-plane.sysusers.conf
+install -Dm0644 -- \
+  "${repository_root}/deploy/systemd/r2-runtime.env.example" \
+  /usr/local/libexec/mcserver/deploy/systemd/r2-runtime.env.example
+install -Dm0755 -- \
+  "${repository_root}/scripts/live_akamai_e2e.py" \
+  /usr/local/libexec/mcserver/scripts/live_akamai_e2e.py
+install -Dm0644 -- \
+  "${repository_root}/scripts/local_e2e.py" \
+  /usr/local/libexec/mcserver/scripts/local_e2e.py
+install -Dm0644 -- \
+  "${repository_root}/deploy/production-deploy.toml.example" \
+  /usr/local/share/mcserver/production-deploy.toml.example
+install -Dm0644 -- \
+  "${repository_root}/examples/community-server.toml" \
+  /usr/local/share/mcserver/community-server.toml
 install -Dm0644 -- \
   "${repository_root}/deploy/systemd/mcserver-control-plane.service" \
   /etc/systemd/system/mcserver-control-plane.service
@@ -27,7 +57,8 @@ install -Dm0644 -- \
   "${repository_root}/deploy/systemd/mcserver-control-plane.sysusers.conf" \
   /etc/sysusers.d/mcserver-control-plane.conf
 systemd-sysusers /etc/sysusers.d/mcserver-control-plane.conf
-install -d -m0750 -o root -g mcserver /etc/mcserver /etc/mcserver/pki
+install -d -m0750 -o root -g mcserver \
+  /etc/mcserver /etc/mcserver/pki /etc/mcserver/servers
 install -d -m0700 -o root -g root /etc/mcserver/credentials
 if [[ ! -e /etc/mcserver/control-plane.env ]]; then
   install -m0640 -o root -g mcserver \
@@ -46,4 +77,7 @@ Then validate and enable:
   mcserverctl --socket /run/mcserver/control-plane.sock ping
   systemctl enable mcserver-control-plane.service
 See docs/production-installation.ja.md before enabling billable creation.
+
+After the first deployment, update and verification commands are available at:
+  /usr/local/libexec/mcserver/deploy/production_deploy.py
 MESSAGE

@@ -38,9 +38,10 @@ impl ServerService {
         desired_spec: DesiredServerSpec,
     ) -> Result<Server, ApplicationError> {
         let now = self.clock.now()?;
+        let name = ServerName::new(name)?;
         let id = ServerId::new();
-        let spec = desired_spec.resolve(None, self.r2_repository(id))?;
-        let server = Server::new(id, ServerName::new(name)?, spec, now)?;
+        let spec = desired_spec.resolve(None, self.r2_repository(&name))?;
+        let server = Server::new(id, name, spec, now)?;
         self.repository.create(&server).await?;
         self.reconcile_scheduler.enqueue_best_effort(server.id);
         Ok(server)
@@ -102,18 +103,34 @@ impl ServerService {
             .ok_or(ApplicationError::NotFound)
     }
 
-    pub async fn list(&self) -> Result<Vec<Server>, ApplicationError> {
-        self.repository.list().await.map_err(Into::into)
+    pub async fn get_by_name(&self, name: String) -> Result<Server, ApplicationError> {
+        let name = ServerName::new(name)?;
+        self.repository
+            .get_by_name(&name)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn list(&self, include_archived: bool) -> Result<Vec<Server>, ApplicationError> {
+        self.repository
+            .list(include_archived)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn set_desired_state(
         &self,
-        id: ServerId,
+        name: String,
         desired_state: DesiredState,
         expected_generation: Option<u64>,
     ) -> Result<Server, ApplicationError> {
+        let name = ServerName::new(name)?;
         for _ in 0..3 {
-            let mut server = self.get(id).await?;
+            let mut server = self
+                .repository
+                .get_by_name(&name)
+                .await?
+                .ok_or(ApplicationError::NotFound)?;
 
             if expected_generation.is_some_and(|expected| expected != server.generation) {
                 return Err(ApplicationError::GenerationConflict {
@@ -138,7 +155,7 @@ impl ServerService {
             }
 
             if expected_generation.is_some() {
-                let actual = self.get(id).await?.generation;
+                let actual = self.get_by_name(name.as_str().to_owned()).await?.generation;
                 return Err(ApplicationError::GenerationConflict {
                     expected: expected_generation,
                     actual,
@@ -149,10 +166,54 @@ impl ServerService {
         Err(ApplicationError::ConcurrentUpdate)
     }
 
-    fn r2_repository(&self, server_id: ServerId) -> Option<String> {
+    pub async fn archive(
+        &self,
+        name: String,
+        expected_generation: Option<u64>,
+    ) -> Result<Server, ApplicationError> {
+        let name = ServerName::new(name)?;
+        for _ in 0..3 {
+            let mut server = self
+                .repository
+                .get_by_name(&name)
+                .await?
+                .ok_or(ApplicationError::NotFound)?;
+            if expected_generation.is_some_and(|expected| expected != server.generation) {
+                return Err(ApplicationError::GenerationConflict {
+                    expected: expected_generation,
+                    actual: server.generation,
+                });
+            }
+            if server.archived_at.is_some() {
+                return Ok(server);
+            }
+            if self.repository.has_active_instance(server.id).await? {
+                return Err(ApplicationError::ServerHasActiveInstance);
+            }
+            let previous_generation = server.generation;
+            server.archive(self.clock.now()?)?;
+            if self
+                .repository
+                .archive(&server, previous_generation)
+                .await?
+            {
+                return Ok(server);
+            }
+            if expected_generation.is_some() {
+                let actual = self.get_by_name(name.as_str().to_owned()).await?.generation;
+                return Err(ApplicationError::GenerationConflict {
+                    expected: expected_generation,
+                    actual,
+                });
+            }
+        }
+        Err(ApplicationError::ConcurrentUpdate)
+    }
+
+    fn r2_repository(&self, server_name: &ServerName) -> Option<String> {
         self.r2_repository_base
             .as_ref()
-            .map(|base| format!("{base}/servers/{server_id}/restic"))
+            .map(|base| format!("{base}/servers/{}/restic", server_name.as_str()))
     }
 }
 
@@ -164,6 +225,8 @@ pub enum ApplicationError {
     NotFound,
     #[error("server instance not found")]
     ServerInstanceNotFound,
+    #[error("server still has an active instance")]
+    ServerHasActiveInstance,
     #[error("generation conflict: expected {expected:?}, actual {actual}")]
     GenerationConflict { expected: Option<u64>, actual: u64 },
     #[error("server was updated concurrently")]

@@ -150,7 +150,7 @@ impl ReconcileWorker {
                     }
                 }
                 _ = resync.tick() => {
-                    match self.server_repository.list().await {
+                    match self.server_repository.list_for_reconciliation().await {
                         Ok(servers) => {
                             debug!(server_count = servers.len(), "starting periodic server resync");
                             let now = Instant::now();

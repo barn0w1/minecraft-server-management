@@ -5,7 +5,6 @@ use mcserver_protocol::client::{ComputeSpec, DesiredDataSpec, ProcessSpec, metho
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
-use uuid::Uuid;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/mcserver/control-plane.sock";
 const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
@@ -27,18 +26,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn execute(client: &UnixRpcClient, command: Command) -> Result<Value, CliError> {
     match command {
         Command::Ping => call(client, method::SYSTEM_PING, Value::Null).await,
-        Command::ServerList => call(client, method::SERVER_LIST, Value::Null).await,
-        Command::ServerGet { server_id } => {
-            call_server_id(client, method::SERVER_GET, server_id).await
+        Command::ServerList { include_archived } => {
+            call(
+                client,
+                method::SERVER_LIST,
+                json!({ "include_archived": include_archived }),
+            )
+            .await
         }
-        Command::ServerStatus { server_id } => {
-            call_server_id(client, method::SERVER_STATUS, server_id).await
+        Command::ServerGet { server_name } => {
+            call_server_name(client, method::SERVER_GET, &server_name).await
         }
-        Command::ServerInstances { server_id } => {
-            call_server_id(client, method::SERVER_INSTANCE_LIST, server_id).await
+        Command::ServerStatus { server_name } => {
+            call_server_name(client, method::SERVER_STATUS, &server_name).await
         }
-        Command::ServerStart { server_id } => set_desired_state(client, server_id, "running").await,
-        Command::ServerStop { server_id } => set_desired_state(client, server_id, "stopped").await,
+        Command::ServerInstances { server_name } => {
+            call_server_name(client, method::SERVER_INSTANCE_LIST, &server_name).await
+        }
+        Command::ServerStart { server_name } => {
+            set_desired_state(client, &server_name, "running").await
+        }
+        Command::ServerStop { server_name } => {
+            set_desired_state(client, &server_name, "stopped").await
+        }
+        Command::ServerArchive { server_name } => archive(client, &server_name).await,
         Command::ServerCreate(options) => {
             apply_definition(client, method::SERVER_CREATE, options, None).await
         }
@@ -71,13 +82,12 @@ async fn apply_definition(
     if !options.start {
         return Ok(server);
     }
-    let id = server
-        .get("id")
+    let name = server
+        .get("name")
         .and_then(Value::as_str)
         .ok_or(CliError::InvalidServerResponse)?
-        .parse()
-        .map_err(CliError::InvalidUuid)?;
-    set_desired_state_from_resource(client, id, server, "running").await
+        .to_owned();
+    set_desired_state_from_resource(client, &name, server, "running").await
 }
 
 async fn call(client: &UnixRpcClient, method_name: &str, params: Value) -> Result<Value, CliError> {
@@ -87,26 +97,26 @@ async fn call(client: &UnixRpcClient, method_name: &str, params: Value) -> Resul
         .map_err(Into::into)
 }
 
-async fn call_server_id(
+async fn call_server_name(
     client: &UnixRpcClient,
     method_name: &str,
-    server_id: Uuid,
+    server_name: &str,
 ) -> Result<Value, CliError> {
-    call(client, method_name, json!({ "server_id": server_id })).await
+    call(client, method_name, json!({ "server_name": server_name })).await
 }
 
 async fn set_desired_state(
     client: &UnixRpcClient,
-    server_id: Uuid,
+    server_name: &str,
     desired_state: &str,
 ) -> Result<Value, CliError> {
-    let server = call_server_id(client, method::SERVER_GET, server_id).await?;
-    set_desired_state_from_resource(client, server_id, server, desired_state).await
+    let server = call_server_name(client, method::SERVER_GET, server_name).await?;
+    set_desired_state_from_resource(client, server_name, server, desired_state).await
 }
 
 async fn set_desired_state_from_resource(
     client: &UnixRpcClient,
-    server_id: Uuid,
+    server_name: &str,
     server: Value,
     desired_state: &str,
 ) -> Result<Value, CliError> {
@@ -118,8 +128,25 @@ async fn set_desired_state_from_resource(
         client,
         method::SERVER_SET_DESIRED_STATE,
         json!({
-            "server_id": server_id,
+            "server_name": server_name,
             "desired_state": desired_state,
+            "expected_generation": generation,
+        }),
+    )
+    .await
+}
+
+async fn archive(client: &UnixRpcClient, server_name: &str) -> Result<Value, CliError> {
+    let server = call_server_name(client, method::SERVER_GET, server_name).await?;
+    let generation = server
+        .get("generation")
+        .and_then(Value::as_u64)
+        .ok_or(CliError::InvalidServerResponse)?;
+    call(
+        client,
+        method::SERVER_ARCHIVE,
+        json!({
+            "server_name": server_name,
             "expected_generation": generation,
         }),
     )
@@ -162,21 +189,26 @@ impl Invocation {
 
 enum Command {
     Ping,
-    ServerList,
+    ServerList {
+        include_archived: bool,
+    },
     ServerGet {
-        server_id: Uuid,
+        server_name: String,
     },
     ServerStatus {
-        server_id: Uuid,
+        server_name: String,
     },
     ServerInstances {
-        server_id: Uuid,
+        server_name: String,
     },
     ServerStart {
-        server_id: Uuid,
+        server_name: String,
     },
     ServerStop {
-        server_id: Uuid,
+        server_name: String,
+    },
+    ServerArchive {
+        server_name: String,
     },
     ServerCreate(DefinitionOptions),
     ServerApply {
@@ -188,21 +220,42 @@ enum Command {
 fn parse_command(arguments: Vec<String>) -> Result<Command, CliError> {
     match arguments.as_slice() {
         [command] if command == "ping" => Ok(Command::Ping),
-        [resource, action] if resource == "server" && action == "list" => Ok(Command::ServerList),
-        [resource, action, id]
+        [resource, action] if resource == "server" && action == "list" => Ok(Command::ServerList {
+            include_archived: false,
+        }),
+        [resource, action, flag]
+            if resource == "server" && action == "list" && flag == "--include-archived" =>
+        {
+            Ok(Command::ServerList {
+                include_archived: true,
+            })
+        }
+        [resource, action, name]
             if resource == "server"
                 && matches!(
                     action.as_str(),
-                    "get" | "status" | "instances" | "start" | "stop"
+                    "get" | "status" | "instances" | "start" | "stop" | "archive"
                 ) =>
         {
-            let server_id = id.parse().map_err(CliError::InvalidUuid)?;
             match action.as_str() {
-                "get" => Ok(Command::ServerGet { server_id }),
-                "status" => Ok(Command::ServerStatus { server_id }),
-                "instances" => Ok(Command::ServerInstances { server_id }),
-                "start" => Ok(Command::ServerStart { server_id }),
-                "stop" => Ok(Command::ServerStop { server_id }),
+                "get" => Ok(Command::ServerGet {
+                    server_name: name.clone(),
+                }),
+                "status" => Ok(Command::ServerStatus {
+                    server_name: name.clone(),
+                }),
+                "instances" => Ok(Command::ServerInstances {
+                    server_name: name.clone(),
+                }),
+                "start" => Ok(Command::ServerStart {
+                    server_name: name.clone(),
+                }),
+                "stop" => Ok(Command::ServerStop {
+                    server_name: name.clone(),
+                }),
+                "archive" => Ok(Command::ServerArchive {
+                    server_name: name.clone(),
+                }),
                 _ => Err(CliError::Usage),
             }
         }
@@ -333,8 +386,6 @@ enum CliError {
     },
     #[error("{0} must be greater than zero")]
     ZeroValue(&'static str),
-    #[error("server id is invalid")]
-    InvalidUuid(#[source] uuid::Error),
     #[error("--expected-generation is only valid with server apply")]
     CreateExpectedGeneration,
     #[error("server definition {path} could not be read")]
@@ -359,12 +410,13 @@ enum CliError {
 
 const USAGE: &str = r#"Usage:
   mcserverctl [--socket PATH] ping
-  mcserverctl [--socket PATH] server list
-  mcserverctl [--socket PATH] server get SERVER_ID
-  mcserverctl [--socket PATH] server status SERVER_ID
-  mcserverctl [--socket PATH] server instances SERVER_ID
-  mcserverctl [--socket PATH] server start SERVER_ID
-  mcserverctl [--socket PATH] server stop SERVER_ID
+  mcserverctl [--socket PATH] server list [--include-archived]
+  mcserverctl [--socket PATH] server get SERVER_NAME
+  mcserverctl [--socket PATH] server status SERVER_NAME
+  mcserverctl [--socket PATH] server instances SERVER_NAME
+  mcserverctl [--socket PATH] server start SERVER_NAME
+  mcserverctl [--socket PATH] server stop SERVER_NAME
+  mcserverctl [--socket PATH] server archive SERVER_NAME
   mcserverctl [--socket PATH] server create --file FILE [--start]
   mcserverctl [--socket PATH] server apply --file FILE [--start]
     [--expected-generation GENERATION]"#;
@@ -379,9 +431,12 @@ mod tests {
         let command = parse_command(vec![
             "server".to_owned(),
             "status".to_owned(),
-            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "community".to_owned(),
         ]);
-        assert!(matches!(command, Ok(Command::ServerStatus { .. })));
+        assert!(matches!(
+            command,
+            Ok(Command::ServerStatus { server_name }) if server_name == "community"
+        ));
     }
 
     #[test]

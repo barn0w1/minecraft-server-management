@@ -21,6 +21,7 @@ const MAX_SNAPSHOT_ID_CHARS: usize = 256;
 const MAX_AKAMAI_REGION_CHARS: usize = 64;
 const MAX_AKAMAI_TYPE_CHARS: usize = 128;
 const MAX_AKAMAI_IMAGE_CHARS: usize = 256;
+const MAX_SERVER_NAME_CHARS: usize = 63;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -62,22 +63,30 @@ pub struct ServerName(String);
 impl ServerName {
     pub fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
         let value = value.into();
-        let trimmed = value.trim();
-
-        if trimmed.is_empty() {
+        if value.is_empty() {
             return Err(ValidationError::BlankField("name"));
         }
-        if trimmed.chars().count() > 128 {
+        if value.len() > MAX_SERVER_NAME_CHARS {
             return Err(ValidationError::FieldTooLong {
                 field: "name",
-                maximum: 128,
+                maximum: MAX_SERVER_NAME_CHARS,
             });
         }
-        if trimmed.chars().any(char::is_control) {
-            return Err(ValidationError::ControlCharacter("name"));
+        let bytes = value.as_bytes();
+        if !bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            || !bytes
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        {
+            return Err(ValidationError::InvalidServerName(value));
         }
 
-        Ok(Self(trimmed.to_owned()))
+        Ok(Self(value))
     }
 
     #[must_use]
@@ -329,6 +338,7 @@ pub struct Server {
     pub desired_state: DesiredState,
     pub spec: ServerSpec,
     pub current_snapshot_id: Option<String>,
+    pub archived_at: Option<UnixTimestampMillis>,
     pub created_at: UnixTimestampMillis,
     pub updated_at: UnixTimestampMillis,
 }
@@ -349,6 +359,7 @@ impl Server {
             desired_state: DesiredState::Stopped,
             spec,
             current_snapshot_id: None,
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -362,6 +373,7 @@ impl Server {
         desired_state: DesiredState,
         spec: ServerSpec,
         current_snapshot_id: Option<String>,
+        archived_at: Option<UnixTimestampMillis>,
         created_at: UnixTimestampMillis,
         updated_at: UnixTimestampMillis,
     ) -> Result<Self, ValidationError> {
@@ -370,6 +382,14 @@ impl Server {
         }
         if updated_at < created_at {
             return Err(ValidationError::InvalidTimestampOrder);
+        }
+        if archived_at
+            .is_some_and(|archived_at| archived_at < created_at || archived_at > updated_at)
+        {
+            return Err(ValidationError::InvalidTimestampOrder);
+        }
+        if archived_at.is_some() && desired_state != DesiredState::Stopped {
+            return Err(ValidationError::ArchivedServerMustBeStopped);
         }
         if let Some(snapshot_id) = current_snapshot_id.as_deref() {
             require_non_blank("current_snapshot_id", snapshot_id)?;
@@ -385,6 +405,7 @@ impl Server {
             desired_state,
             spec,
             current_snapshot_id,
+            archived_at,
             created_at,
             updated_at,
         })
@@ -395,6 +416,9 @@ impl Server {
         desired_state: DesiredState,
         now: UnixTimestampMillis,
     ) -> Result<bool, ValidationError> {
+        if self.archived_at.is_some() {
+            return Err(ValidationError::ServerArchived);
+        }
         if self.desired_state == desired_state {
             return Ok(false);
         }
@@ -414,6 +438,9 @@ impl Server {
         now: UnixTimestampMillis,
     ) -> Result<bool, ValidationError> {
         spec.validate()?;
+        if self.archived_at.is_some() {
+            return Err(ValidationError::ServerArchived);
+        }
         if self.spec == spec {
             return Ok(false);
         }
@@ -426,6 +453,22 @@ impl Server {
             .checked_add(1)
             .ok_or(ValidationError::GenerationOverflow)?;
         self.updated_at = std::cmp::max(self.updated_at, now);
+        Ok(true)
+    }
+
+    pub fn archive(&mut self, now: UnixTimestampMillis) -> Result<bool, ValidationError> {
+        if self.archived_at.is_some() {
+            return Ok(false);
+        }
+        if self.desired_state != DesiredState::Stopped {
+            return Err(ValidationError::ServerMustBeStopped);
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ValidationError::GenerationOverflow)?;
+        self.updated_at = std::cmp::max(self.updated_at, now);
+        self.archived_at = Some(self.updated_at);
         Ok(true)
     }
 }
@@ -472,6 +515,10 @@ pub enum ValidationError {
     FieldTooLong { field: &'static str, maximum: usize },
     #[error("{0} must not contain control characters")]
     ControlCharacter(&'static str),
+    #[error(
+        "server name must be a 1-63 character lowercase DNS label using only letters, digits, and hyphens"
+    )]
+    InvalidServerName(String),
     #[error("{0} must not contain a NUL byte")]
     NulByte(&'static str),
     #[error("{0} must be greater than zero")]
@@ -490,6 +537,10 @@ pub enum ValidationError {
     GenerationOverflow,
     #[error("server specification can only be changed while stopped")]
     ServerMustBeStopped,
+    #[error("archived server must be stopped")]
+    ArchivedServerMustBeStopped,
+    #[error("archived server cannot be changed or started")]
+    ServerArchived,
     #[error("server data backend cannot be changed")]
     DataBackendImmutable,
     #[error("server data repository cannot be changed")]
@@ -539,6 +590,31 @@ mod tests {
 
         assert_eq!(server.generation, 1);
         assert_eq!(server.desired_state, DesiredState::Stopped);
+        assert!(server.archived_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn server_names_are_lowercase_dns_labels() -> Result<(), Box<dyn std::error::Error>> {
+        for valid in ["a", "1", "community", "survival-2026", &"a".repeat(63)] {
+            assert_eq!(ServerName::new(valid)?.as_str(), valid);
+        }
+
+        for invalid in [
+            "",
+            "-community",
+            "community-",
+            "Community",
+            "community_server",
+            "community server",
+            "コミュニティ",
+        ] {
+            assert!(
+                ServerName::new(invalid).is_err(),
+                "{invalid:?} was accepted"
+            );
+        }
+        assert!(ServerName::new("a".repeat(64)).is_err());
         Ok(())
     }
 
@@ -640,6 +716,51 @@ mod tests {
 
         assert!(!server.update_spec(valid_spec(), now)?);
         assert_eq!(server.generation, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_server_can_be_archived_exactly_once() -> Result<(), Box<dyn std::error::Error>> {
+        let created_at = UnixTimestampMillis::from_millis(1_000)?;
+        let archived_at = UnixTimestampMillis::from_millis(2_000)?;
+        let mut server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            created_at,
+        )?;
+
+        assert!(server.archive(archived_at)?);
+        assert_eq!(server.generation, 2);
+        assert_eq!(server.archived_at, Some(archived_at));
+        assert!(!server.archive(UnixTimestampMillis::from_millis(3_000)?)?);
+        assert_eq!(server.generation, 2);
+        assert!(matches!(
+            server.set_desired_state(DesiredState::Running, archived_at),
+            Err(ValidationError::ServerArchived)
+        ));
+        assert!(matches!(
+            server.update_spec(valid_spec(), archived_at),
+            Err(ValidationError::ServerArchived)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn running_server_cannot_be_archived() -> Result<(), Box<dyn std::error::Error>> {
+        let now = UnixTimestampMillis::from_millis(1_000)?;
+        let mut server = Server::new(
+            ServerId::new(),
+            ServerName::new("community")?,
+            valid_spec(),
+            now,
+        )?;
+        server.set_desired_state(DesiredState::Running, now)?;
+
+        assert!(matches!(
+            server.archive(now),
+            Err(ValidationError::ServerMustBeStopped)
+        ));
         Ok(())
     }
 

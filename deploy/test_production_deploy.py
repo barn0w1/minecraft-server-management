@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import production_deploy as deploy
@@ -46,7 +47,7 @@ class ProductionDeployTest(unittest.TestCase):
             textwrap.dedent(
                 f"""\
                 [release]
-                version = "v0.2.0"
+                version = "v0.3.0"
                 repository = "barn0w1/minecraft-server-management"
                 target = "x86_64-unknown-linux-musl"
                 checksums_sha256 = "{'a' * 64}"
@@ -106,19 +107,19 @@ class ProductionDeployTest(unittest.TestCase):
         self.assertIn("MCSERVER_AKAMAI_REAP_ORPHANS_ON_START=false\n", disabled)
         self.assertIn("MCSERVER_AKAMAI_LIVE_ENABLED=true\n", enabled)
         self.assertIn(
-            "mcserver-node-agent-v0.2.0-x86_64-unknown-linux-musl", enabled
+            "mcserver-node-agent-v0.3.0-x86_64-unknown-linux-musl", enabled
         )
 
     def test_ping_response_accepts_successful_json(self) -> None:
         self.assertTrue(
             deploy.ping_response_is_ok(
-                '{\n  "status": "ok",\n  "version": "0.2.0"\n}'
+                '{\n  "status": "ok",\n  "version": "0.3.0"\n}'
             )
         )
         self.assertFalse(
-            deploy.ping_response_is_ok('{"status":"error","version":"0.2.0"}')
+            deploy.ping_response_is_ok('{"status":"error","version":"0.3.0"}')
         )
-        self.assertFalse(deploy.ping_response_is_ok("status=ok version=0.2.0"))
+        self.assertFalse(deploy.ping_response_is_ok("status=ok version=0.3.0"))
 
     def test_existing_live_state_is_preserved_only_when_explicitly_true(self) -> None:
         environment = self.root / "control-plane.env"
@@ -275,7 +276,7 @@ class ProductionDeployTest(unittest.TestCase):
     def test_report_is_atomic_and_secret_free_by_construction(self) -> None:
         report_path = self.root / "report.json"
         report = deploy.Report(command="check", config="/tmp/production.toml")
-        report.release = "v0.2.0"
+        report.release = "v0.3.0"
         report.record("deployment inputs")
         report.succeed()
         report.write(report_path)
@@ -283,6 +284,22 @@ class ProductionDeployTest(unittest.TestCase):
         self.assertIn('"outcome": "passed"', payload)
         self.assertNotIn("correct-horse-battery-staple", payload)
         self.assertEqual(os.stat(report_path).st_mode & 0o777, 0o640)
+
+    def test_install_file_only_normalizes_metadata_when_source_is_destination(
+        self,
+    ) -> None:
+        source = self.root / "credential"
+        source.write_text("secret\n", encoding="utf-8")
+        with mock.patch.object(deploy, "run") as run:
+            deploy.install_file(source, str(source), "0600", "root")
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(["chown", "root:root", "--", str(source)]),
+                mock.call(["chmod", "0600", "--", str(source)]),
+            ],
+        )
 
 
 if __name__ == "__main__":

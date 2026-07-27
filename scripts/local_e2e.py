@@ -134,13 +134,13 @@ def wait_until(
     raise TimeoutError(f"timed out waiting for {description}; last={last_value!r}")
 
 
-def list_instances(client: JsonRpcClient, server_id: str) -> list[dict[str, Any]]:
-    result = client.call("server_instance.list", {"server_id": server_id})
+def list_instances(client: JsonRpcClient, server_name: str) -> list[dict[str, Any]]:
+    result = client.call("server_instance.list", {"server_name": server_name})
     return result["server_instances"]
 
 
-def active_instance(client: JsonRpcClient, server_id: str) -> dict[str, Any] | None:
-    instances = list_instances(client, server_id)
+def active_instance(client: JsonRpcClient, server_name: str) -> dict[str, Any] | None:
+    instances = list_instances(client, server_name)
     active = [item for item in instances if item["terminated_at_ms"] is None]
     if len(active) > 1:
         raise RpcError(f"more than one active ServerInstance exists: {active!r}")
@@ -149,7 +149,7 @@ def active_instance(client: JsonRpcClient, server_id: str) -> dict[str, Any] | N
 
 def wait_for_running_instance(
     client: JsonRpcClient,
-    server_id: str,
+    server_name: str,
     previous_instance_id: str | None,
     deadline: float,
 ) -> dict[str, Any]:
@@ -157,7 +157,7 @@ def wait_for_running_instance(
 
     def inspect() -> dict[str, Any] | None:
         nonlocal last_error
-        instance = active_instance(client, server_id)
+        instance = active_instance(client, server_name)
         if instance is None or instance["id"] == previous_instance_id:
             return None
         last_error = instance.get("last_error")
@@ -173,7 +173,7 @@ def wait_for_running_instance(
 
 def wait_for_completed_instance(
     client: JsonRpcClient,
-    server_id: str,
+    server_name: str,
     instance_id: str,
     deadline: float,
 ) -> dict[str, Any]:
@@ -181,7 +181,7 @@ def wait_for_completed_instance(
 
     def inspect() -> dict[str, Any] | None:
         nonlocal last_error
-        for instance in list_instances(client, server_id):
+        for instance in list_instances(client, server_name):
             if instance["id"] != instance_id:
                 continue
             last_error = instance.get("last_error")
@@ -289,15 +289,16 @@ def cleanup_failed_run(
     local_scope: str,
 ) -> None:
     server_id = server["id"]
+    server_name = server["name"]
     try:
-        current = client.call("server.get", {"server_id": server_id})
+        current = client.call("server.get", {"server_name": server_name})
         if current["desired_state"] != "stopped":
             current = set_desired_state(client, current, "stopped")
-        instance = active_instance(client, server_id)
+        instance = active_instance(client, server_name)
         if instance is not None:
             wait_for_completed_instance(
                 client,
-                server_id,
+                server_name,
                 instance["id"],
                 cleanup_deadline,
             )
@@ -316,7 +317,7 @@ def set_desired_state(
     return client.call(
         "server.set_desired_state",
         {
-            "server_id": server["id"],
+            "server_name": server["name"],
             "desired_state": desired_state,
             "expected_generation": server["generation"],
         },
@@ -335,7 +336,7 @@ def run_cycle(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     server = set_desired_state(client, server, "running")
     instance = wait_for_running_instance(
-        client, server["id"], previous_instance_id, deadline
+        client, server["name"], previous_instance_id, deadline
     )
     if instance.get("source_snapshot_id") != expected_source_snapshot:
         raise RpcError(
@@ -353,9 +354,9 @@ def run_cycle(
 
     server = set_desired_state(client, server, "stopped")
     completed = wait_for_completed_instance(
-        client, server["id"], instance["id"], deadline
+        client, server["name"], instance["id"], deadline
     )
-    server = client.call("server.get", {"server_id": server["id"]})
+    server = client.call("server.get", {"server_name": server["name"]})
     snapshot_id = completed["result_snapshot_id"]
     if server.get("current_snapshot_id") != snapshot_id:
         raise RpcError(

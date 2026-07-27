@@ -1,9 +1,9 @@
-# Copy this file outside the Git checkout, replace every REPLACE_ value, and
-# keep it mode 0600. Values under [files] are paths on the AlmaLinux 10
-# control-plane host; secret contents never belong in this TOML file.
+# Install this file as /etc/mcserver/deployment.toml, replace every REPLACE_
+# value, and keep it mode 0600. Values under [files] are standard paths on the
+# AlmaLinux 10 control-plane host; secret contents never belong in this TOML.
 
 [release]
-version = "v0.2.0"
+version = "v0.3.0"
 repository = "barn0w1/minecraft-server-management"
 target = "x86_64-unknown-linux-musl"
 checksums_sha256 = "REPLACE_WITH_SHA256SUMS_DIGEST"
@@ -32,15 +32,15 @@ bucket = "REPLACE_WITH_DEDICATED_BUCKET"
 temporary_credential_ttl_seconds = 46800
 
 [files]
-akamai_api_token = "/root/mcserver-production/akamai-api-token"
-r2_api_token = "/root/mcserver-production/r2-api-token"
+akamai_api_token = "/etc/mcserver/credentials/akamai-api-token"
+r2_api_token = "/etc/mcserver/credentials/r2-api-token"
 remote_tls_private_key = "/etc/letsencrypt/live/agent.mcserver.hss-science.org/privkey.pem"
-agent_client_ca_private_key = "/root/mcserver-production/agent-client-ca/agent-client-ca-private-key.pem"
-r2_runtime_environment = "/root/mcserver-production/r2-runtime.env"
+agent_client_ca_private_key = "/etc/mcserver/credentials/agent-client-ca-private-key.pem"
+r2_runtime_environment = "/etc/mcserver/credentials/r2-runtime.env"
 remote_tls_fullchain = "/etc/letsencrypt/live/agent.mcserver.hss-science.org/fullchain.pem"
 remote_tls_root_ca = "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
-agent_client_ca_certificate = "/root/mcserver-production/agent-client-ca/agent-client-ca.pem"
-authorized_keys = "/root/mcserver-production/authorized_keys"
+agent_client_ca_certificate = "/etc/mcserver/pki/agent-client-ca.pem"
+authorized_keys = "/etc/mcserver/authorized_keys"
 
 [acceptance]
 region = "jp-tyo-3"

@@ -752,11 +752,18 @@ def main() -> int:
                 },
             )
             server_id = str(server["id"])
-            repository_prefix = f"servers/{server_id}/restic/"
+            server_name = str(server["name"])
+            repository_prefix = f"servers/{server_name}/restic/"
+            if not str(server["spec"]["data"]["repository"]).endswith(
+                f"/{repository_prefix.removesuffix('/')}"
+            ):
+                raise RuntimeError(
+                    f"R2 repository is not name-derived: {server['spec']['data']!r}"
+                )
             client.call(
                 "server.set_desired_state",
                 {
-                    "server_id": server_id,
+                    "server_name": server_name,
                     "desired_state": "running",
                     "expected_generation": server["generation"],
                 },
@@ -777,7 +784,7 @@ def main() -> int:
                         fake_restic,
                         runtime,
                     )
-                    instance = local.active_instance(client, server_id)
+                    instance = local.active_instance(client, server_name)
                     if (
                         instance is not None
                         and instance["id"] != previous
@@ -793,26 +800,26 @@ def main() -> int:
                 expected_source = None if generation == 1 else snapshots[-1]
                 if instance.get("source_snapshot_id") != expected_source:
                     raise RuntimeError(f"unexpected source snapshot: {instance!r}")
-                current = client.call("server.get", {"server_id": server_id})
+                current = client.call("server.get", {"server_name": server_name})
                 client.call(
                     "server.set_desired_state",
                     {
-                        "server_id": server_id,
+                        "server_name": server_name,
                         "desired_state": "stopped",
                         "expected_generation": current["generation"],
                     },
                 )
                 completed = local.wait_for_completed_instance(
-                    client, server_id, str(instance["id"]), time.monotonic() + 60
+                    client, server_name, str(instance["id"]), time.monotonic() + 60
                 )
                 snapshots.append(str(completed["result_snapshot_id"]))
                 previous = str(instance["id"])
                 if generation == 1:
-                    current = client.call("server.get", {"server_id": server_id})
+                    current = client.call("server.get", {"server_name": server_name})
                     client.call(
                         "server.set_desired_state",
                         {
-                            "server_id": server_id,
+                            "server_name": server_name,
                             "desired_state": "running",
                             "expected_generation": current["generation"],
                         },
@@ -827,6 +834,25 @@ def main() -> int:
                 time.sleep(0.1)
             else:
                 raise RuntimeError("remote provider cleanup did not delete VMs and agents")
+
+            current = client.call("server.get", {"server_name": server_name})
+            archived = client.call(
+                "server.archive",
+                {
+                    "server_name": server_name,
+                    "expected_generation": current["generation"],
+                },
+            )
+            if archived.get("archived_at_ms") is None:
+                raise RuntimeError(f"server archive did not persist: {archived!r}")
+            visible = client.call("server.list", {})["servers"]
+            if any(item["name"] == server_name for item in visible):
+                raise RuntimeError("archived server remained in the default server list")
+            all_servers = client.call(
+                "server.list", {"include_archived": True}
+            )["servers"]
+            if not any(item["name"] == server_name for item in all_servers):
+                raise RuntimeError("archived server disappeared from audit history")
 
             with api_state.lock:
                 if len(api_state.requests) != 2 or len(api_state.deleted) != 3:

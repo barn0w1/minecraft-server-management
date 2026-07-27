@@ -1,9 +1,9 @@
 use mcserver_protocol::{
     client::{
-        self, ApplyServerParams, ComputeInstanceResource, CreateServerParams,
+        self, ApplyServerParams, ArchiveServerParams, ComputeInstanceResource, CreateServerParams,
         GetServerInstanceParams, GetServerParams, ListServerInstancesParams,
-        ListServerInstancesResult, ListServersResult, PingResult, ServerInstanceResource,
-        ServerResource, ServerStatusResource, SetServerDesiredStateParams,
+        ListServerInstancesResult, ListServersParams, ListServersResult, PingResult,
+        ServerInstanceResource, ServerResource, ServerStatusResource, SetServerDesiredStateParams,
     },
     json_rpc::{self, ErrorObject, Request, Response},
 };
@@ -17,8 +17,8 @@ use crate::{
     },
     domain::{
         ComputeInstance, ComputeSpec, ComputeTerminalResult, DataBackend, DesiredDataSpec,
-        DesiredServerSpec, DesiredState, ProcessSpec, Server, ServerId, ServerInstance,
-        ServerInstanceId, ServerSpec, TerminalResult,
+        DesiredServerSpec, DesiredState, ProcessSpec, Server, ServerInstance, ServerInstanceId,
+        ServerSpec, TerminalResult,
     },
 };
 
@@ -160,17 +160,14 @@ impl ClientRpcHandler {
             }
             client::method::SERVER_GET => {
                 let params = parse_params::<GetServerParams>(params)?;
-                let server = self
-                    .server_service
-                    .get(ServerId::from_uuid(params.server_id))
-                    .await?;
+                let server = self.server_service.get_by_name(params.server_name).await?;
                 to_value(protocol_server(server))
             }
             client::method::SERVER_LIST => {
-                require_no_params(&params)?;
+                let params = parse_optional_params::<ListServersParams>(params)?;
                 let servers = self
                     .server_service
-                    .list()
+                    .list(params.include_archived)
                     .await?
                     .into_iter()
                     .map(protocol_server)
@@ -179,10 +176,8 @@ impl ClientRpcHandler {
             }
             client::method::SERVER_STATUS => {
                 let params = parse_params::<GetServerParams>(params)?;
-                let status = self
-                    .server_status_service
-                    .get(ServerId::from_uuid(params.server_id))
-                    .await?;
+                let server = self.server_service.get_by_name(params.server_name).await?;
+                let status = self.server_status_service.get(server.id).await?;
                 to_value(protocol_server_status(status))
             }
             client::method::SERVER_SET_DESIRED_STATE => {
@@ -190,10 +185,18 @@ impl ClientRpcHandler {
                 let server = self
                     .server_service
                     .set_desired_state(
-                        ServerId::from_uuid(params.server_id),
+                        params.server_name,
                         domain_desired_state(params.desired_state),
                         params.expected_generation,
                     )
+                    .await?;
+                to_value(protocol_server(server))
+            }
+            client::method::SERVER_ARCHIVE => {
+                let params = parse_params::<ArchiveServerParams>(params)?;
+                let server = self
+                    .server_service
+                    .archive(params.server_name, params.expected_generation)
                     .await?;
                 to_value(protocol_server(server))
             }
@@ -207,9 +210,10 @@ impl ClientRpcHandler {
             }
             client::method::SERVER_INSTANCE_LIST => {
                 let params = parse_params::<ListServerInstancesParams>(params)?;
+                let server = self.server_service.get_by_name(params.server_name).await?;
                 let server_instances = self
                     .server_instance_service
-                    .list_for_server(ServerId::from_uuid(params.server_id))
+                    .list_for_server(server.id)
                     .await?
                     .into_iter()
                     .map(protocol_server_instance)
@@ -224,6 +228,17 @@ impl ClientRpcHandler {
 fn parse_params<T: DeserializeOwned>(params: Value) -> Result<T, RpcDispatchError> {
     serde_json::from_value(params)
         .map_err(|error| RpcDispatchError::InvalidParams(error.to_string()))
+}
+
+fn parse_optional_params<T>(params: Value) -> Result<T, RpcDispatchError>
+where
+    T: DeserializeOwned + Default,
+{
+    if params.is_null() {
+        Ok(T::default())
+    } else {
+        parse_params(params)
+    }
 }
 
 fn require_no_params(params: &Value) -> Result<(), RpcDispatchError> {
@@ -350,6 +365,7 @@ fn protocol_server(server: Server) -> ServerResource {
         spec: protocol_spec(server.spec),
         created_at_ms: server.created_at.as_millis(),
         current_snapshot_id: server.current_snapshot_id,
+        archived_at_ms: server.archived_at.map(|value| value.as_millis()),
         updated_at_ms: server.updated_at.as_millis(),
     }
 }
@@ -458,6 +474,7 @@ impl RpcDispatchError {
             Self::Application(
                 error @ (ApplicationError::GenerationConflict { .. }
                 | ApplicationError::ConcurrentUpdate
+                | ApplicationError::ServerHasActiveInstance
                 | ApplicationError::Repository(
                     crate::infrastructure::RepositoryError::Conflict(_),
                 )),

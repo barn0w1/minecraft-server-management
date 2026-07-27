@@ -7,12 +7,17 @@ TLS を直接終端します。reverse proxy は使用しません。
 
 | 種類 | Path |
 |---|---|
+| deployment config | `/etc/mcserver/deployment.toml` |
 | non-secret config | `/etc/mcserver/control-plane.env` |
 | public PKI | `/etc/mcserver/pki/` |
 | root credential | `/etc/mcserver/credentials/` |
 | authorized keys | `/etc/mcserver/authorized_keys` |
+| Server definition | `/etc/mcserver/servers/` |
 | SQLite | `/var/lib/mcserver/` |
+| deployment report | `/var/lib/mcserver-deploy/` |
 | Unix socket / temporary PKI | `/run/mcserver/` |
+| binaries | `/usr/local/bin/` |
+| operator tools | `/usr/local/libexec/mcserver/` |
 
 systemd credential:
 

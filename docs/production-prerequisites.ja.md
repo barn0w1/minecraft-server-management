@@ -56,8 +56,8 @@ dig +short agent.mcserver.example.org A
 
 ## 3. Cloudflare R2
 
-1つの専用 bucket を作ります。例では `mcserver` とします。bucket 内の folder や
-`production-acceptance` prefix を事前作成する必要はありません。
+control plane専用bucketを1つだけ作ります。例では `mcserver` とします。Serverごとの
+bucketやfolderを事前作成する必要はありません。
 
 control plane に必要なのは次の3値です。
 
@@ -79,10 +79,11 @@ POST /client/v4/accounts/<ACCOUNT_ID>/r2/temp-access-credentials
 Server 作成後の repository は自動的に次の形になります。
 
 ```text
-s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/servers/<SERVER_UUID>/restic
+s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/servers/<SERVER_NAME>/restic
 ```
 
-restic repository の初期化も node agent が最初の起動時に行います。
+restic repositoryの初期化もnode agentが最初の起動時に行います。Serverをアーカイブしても
+このprefixのobjectは削除しません。削除が必要な場合だけ、operatorがR2側で明示的に行います。
 
 公式資料:
 
@@ -128,10 +129,10 @@ preflight がすべての allowlist 値を provider API で検査します。
 
 ## 5. GitHub Release
 
-本番 deploy は source tree をその場で build せず、`v0.2.0` の GitHub Release asset を
+本番 deploy は source tree をその場で build せず、`v0.3.0` の GitHub Release asset を
 検証してインストールします。release は次を満たす必要があります。
 
-- annotated tag `v0.2.0`
+- annotated tag `v0.3.0`
 - tag が `origin/main` の commit を指す
 - static `x86_64-unknown-linux-musl` binaries
 - `SHA256SUMS`、build metadata、SBOM、provenance attestation
@@ -145,4 +146,4 @@ release 作成は `.github/workflows/release.yml` が行います。
 - R2 bucket、Cloudflare API token、parent access key ID がある
 - Akamai API token、enabled firewall、resource の候補がある
 - operator SSH public keyがある
-- `v0.2.0` release が公開済み
+- `v0.3.0` release が公開済み

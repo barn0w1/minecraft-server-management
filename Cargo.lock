@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "mcserver-control-plane"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "mcserver-protocol",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "mcserver-node-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mcserver-protocol",
  "rustls-pemfile",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "mcserver-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
