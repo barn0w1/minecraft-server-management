@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     agent::AgentRegistry,
+    config::node_operation_timeout,
     domain::{
         Clock, ComputeInstance, ComputeInstanceId, ComputeProvider, ComputeTerminalResult,
         ServerInstance, ServerInstanceId, SystemClock, UnixTimestampMillis,
@@ -483,13 +484,6 @@ impl LocalComputeManager {
     }
 }
 
-fn node_operation_timeout(agent_call_timeout: Duration) -> Duration {
-    agent_call_timeout
-        .checked_sub(Duration::from_secs(5))
-        .filter(|duration| !duration.is_zero())
-        .unwrap_or(Duration::from_secs(1))
-}
-
 async fn terminate_spawned_child(child: &mut Child, compute_id: ComputeInstanceId) {
     if let Err(error) = child.kill().await {
         warn!(
@@ -748,7 +742,9 @@ pub enum LocalComputeError {
 mod tests {
     use std::time::Duration;
 
-    use super::{LinuxProcessState, node_operation_timeout, parse_linux_process_stat};
+    use crate::config::node_operation_timeout;
+
+    use super::{LinuxProcessState, parse_linux_process_stat};
 
     #[test]
     fn node_operation_timeout_leaves_response_budget() {

@@ -84,6 +84,8 @@ MCSERVER_NODE_AGENT_CONNECTION_TOKEN={enrollment_token}
 MCSERVER_NODE_AGENT_STATE_DIRECTORY={state_directory}
 MCSERVER_NODE_AGENT_LOCAL_SCOPE={provider_scope}
 MCSERVER_NODE_AGENT_DATA_ACCESS_MODE=host
+MCSERVER_NODE_AGENT_MAX_FRAME_BYTES={max_frame_bytes}
+MCSERVER_NODE_AGENT_COMMAND_TIMEOUT_SECONDS={command_timeout_seconds}
 MCSERVER_AGENT_ENV
 chmod 0600 {ca_path} {env_path}
 
@@ -105,6 +107,8 @@ systemctl enable --now mcserver-node-agent.service
         compute_instance_id = compute.id,
         enrollment_token = shell_value(enrollment_token),
         provider_scope = shell_value(provider_scope),
+        max_frame_bytes = remote.max_frame_bytes,
+        command_timeout_seconds = remote.node_operation_timeout.as_secs(),
         binary_path = REMOTE_BINARY_PATH,
         download_url = shell_value(&remote.node_agent_download_url),
         binary_sha256 = remote.node_agent_sha256,

@@ -396,7 +396,7 @@ def generate_tls(work: Path) -> tuple[Path, Path, Path, Path]:
             "-out",
             str(server_certificate),
             "-days",
-            "1",
+            "2",
             "-subj",
             "/CN=localhost",
             "-addext",
@@ -466,6 +466,21 @@ def bootstrap_script_from_request(request: dict[str, Any]) -> str:
     return base64.b64decode(metadata["user_data"], validate=True).decode()
 
 
+def bootstrap_environment_value(request: dict[str, Any], key: str) -> str:
+    prefix = f"{key}="
+    line = next(
+        (
+            line
+            for line in bootstrap_script_from_request(request).splitlines()
+            if line.startswith(prefix)
+        ),
+        None,
+    )
+    if line is None:
+        raise RuntimeError(f"cloud-init user data has no {key} setting")
+    return line[len(prefix) :]
+
+
 def manifest_from_request(request: dict[str, Any]) -> dict[str, Any]:
     script = bootstrap_script_from_request(request)
     prefix = "# mcserver-bootstrap: "
@@ -495,6 +510,16 @@ def launch_new_agents(
             continue
         if manifest["control_plane_address"] != remote_address:
             raise RuntimeError("bootstrap manifest contains unexpected control-plane address")
+        max_frame_bytes = bootstrap_environment_value(
+            request, "MCSERVER_NODE_AGENT_MAX_FRAME_BYTES"
+        )
+        command_timeout_seconds = bootstrap_environment_value(
+            request, "MCSERVER_NODE_AGENT_COMMAND_TIMEOUT_SECONDS"
+        )
+        if max_frame_bytes != "131072":
+            raise RuntimeError("cloud-init did not preserve the control-plane frame limit")
+        if command_timeout_seconds != "25":
+            raise RuntimeError("cloud-init did not leave the expected response timeout budget")
         environment = os.environ.copy()
         for key in list(environment):
             if key.startswith("RESTIC_") or key.startswith("AWS_"):
@@ -509,6 +534,8 @@ def launch_new_agents(
                 "MCSERVER_NODE_AGENT_STATE_DIRECTORY": str(work / "remote-agents" / compute_id),
                 "MCSERVER_NODE_AGENT_LOCAL_SCOPE": str(manifest["provider_scope"]),
                 "MCSERVER_NODE_AGENT_DATA_ACCESS_MODE": "host",
+                "MCSERVER_NODE_AGENT_MAX_FRAME_BYTES": max_frame_bytes,
+                "MCSERVER_NODE_AGENT_COMMAND_TIMEOUT_SECONDS": command_timeout_seconds,
                 "MCSERVER_NODE_AGENT_PODMAN_BINARY": str(fake_podman),
                 "MCSERVER_NODE_AGENT_RESTIC_BINARY": str(fake_restic),
                 "MCSERVER_NODE_AGENT_RESTIC_RETRY_LOCK_SECONDS": "1",
@@ -616,6 +643,7 @@ def main() -> int:
             "MCSERVER_CONTROL_PLANE_RECONCILE_INTERVAL_SECONDS": "1",
             "MCSERVER_CONTROL_PLANE_RECONCILE_RETRY_SECONDS": "1",
             "MCSERVER_CONTROL_PLANE_AGENT_COMMAND_TIMEOUT_SECONDS": "30",
+            "MCSERVER_CONTROL_PLANE_MAX_FRAME_BYTES": "131072",
             "MCSERVER_CONTROL_PLANE_SHUTDOWN_TIMEOUT_SECONDS": "5",
             "MCSERVER_CONTROL_PLANE_REMOTE_AGENT_LISTEN_ADDRESS": remote_address,
             "MCSERVER_CONTROL_PLANE_REMOTE_AGENT_PUBLIC_ADDRESS": remote_address,

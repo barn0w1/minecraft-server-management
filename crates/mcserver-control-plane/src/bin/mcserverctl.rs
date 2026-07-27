@@ -215,7 +215,7 @@ enum CreateCompute {
         region: String,
         instance_type: String,
         image: String,
-        firewall_id: Option<u64>,
+        firewall_id: u64,
     },
 }
 
@@ -324,12 +324,22 @@ impl CreateOptions {
             return Err(CliError::EulaNotAccepted);
         }
         let compute = match compute_provider.as_str() {
-            "local" => CreateCompute::Local,
+            "local" => {
+                if akamai_region.is_some()
+                    || akamai_type.is_some()
+                    || akamai_image.is_some()
+                    || akamai_firewall_id.is_some()
+                {
+                    return Err(CliError::AkamaiFlagsRequireAkamaiCompute);
+                }
+                CreateCompute::Local
+            }
             "akamai" => CreateCompute::Akamai {
                 region: akamai_region.ok_or(CliError::MissingRequiredFlag("--akamai-region"))?,
                 instance_type: akamai_type.ok_or(CliError::MissingRequiredFlag("--akamai-type"))?,
                 image: akamai_image.ok_or(CliError::MissingRequiredFlag("--akamai-image"))?,
-                firewall_id: akamai_firewall_id,
+                firewall_id: akamai_firewall_id
+                    .ok_or(CliError::MissingRequiredFlag("--akamai-firewall-id"))?,
             },
             _ => return Err(CliError::InvalidComputeProvider(compute_provider)),
         };
@@ -374,6 +384,8 @@ enum CliError {
     InvalidEnvironment(String),
     #[error("--compute must be local or akamai, got {0}")]
     InvalidComputeProvider(String),
+    #[error("Akamai flags require --compute akamai")]
+    AkamaiFlagsRequireAkamaiCompute,
     #[error("server.create requires --accept-eula")]
     EulaNotAccepted,
     #[error("control-plane returned a server without a valid generation")]
@@ -393,8 +405,8 @@ const USAGE: &str = r#"Usage:
   mcserverctl [--socket PATH] server create \
     --name NAME --repository PATH --accept-eula \
     [--compute local|akamai] \
-    [--akamai-region REGION --akamai-type TYPE --akamai-image IMAGE] \
-    [--akamai-firewall-id ID] [--image IMAGE] [--type TYPE] \
+    [--akamai-region REGION --akamai-type TYPE --akamai-image IMAGE \
+     --akamai-firewall-id ID] [--image IMAGE] [--type TYPE] \
     [--version VERSION] [--port PORT] [--stop-timeout SECONDS] \
     [--env KEY=VALUE]..."#;
 
@@ -450,11 +462,53 @@ mod tests {
             result,
             Ok(CreateOptions {
                 compute: CreateCompute::Akamai {
-                    firewall_id: Some(123),
+                    firewall_id: 123,
                     ..
                 },
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn requires_akamai_firewall_id() {
+        let result = CreateOptions::parse(&[
+            "--name".to_owned(),
+            "remote".to_owned(),
+            "--repository".to_owned(),
+            "s3:s3.example.invalid/bucket".to_owned(),
+            "--accept-eula".to_owned(),
+            "--compute".to_owned(),
+            "akamai".to_owned(),
+            "--akamai-region".to_owned(),
+            "jp-tyo-3".to_owned(),
+            "--akamai-type".to_owned(),
+            "g6-nanode-1".to_owned(),
+            "--akamai-image".to_owned(),
+            "linode/debian13".to_owned(),
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(CliError::MissingRequiredFlag("--akamai-firewall-id"))
+        ));
+    }
+
+    #[test]
+    fn rejects_akamai_flags_for_local_compute() {
+        let result = CreateOptions::parse(&[
+            "--name".to_owned(),
+            "local".to_owned(),
+            "--repository".to_owned(),
+            "/tmp/repository".to_owned(),
+            "--accept-eula".to_owned(),
+            "--akamai-region".to_owned(),
+            "jp-tyo-3".to_owned(),
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(CliError::AkamaiFlagsRequireAkamaiCompute)
         ));
     }
 }

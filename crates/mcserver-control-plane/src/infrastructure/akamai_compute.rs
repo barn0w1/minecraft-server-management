@@ -129,7 +129,7 @@ impl AkamaiComputeManager {
         region: &str,
         instance_type: &str,
         image: &str,
-        firewall_id: Option<u64>,
+        firewall_id: u64,
     ) -> Result<(), AkamaiComputeError> {
         if region != self.config.region {
             return Err(AkamaiComputeError::RegionNotAllowed {
@@ -148,7 +148,7 @@ impl AkamaiComputeManager {
                 instance_type.to_owned(),
             ));
         }
-        if firewall_id != Some(self.config.firewall_id) {
+        if firewall_id != self.config.firewall_id {
             return Err(AkamaiComputeError::FirewallNotAllowed {
                 requested: firewall_id,
                 required: self.config.firewall_id,
@@ -399,7 +399,7 @@ impl AkamaiComputeManager {
             booted: true,
             authorized_keys: bootstrap.authorized_keys,
             tags: vec![MANAGED_TAG.to_owned(), self.scope_tag()],
-            firewall_id: Some(self.config.firewall_id),
+            firewall_id: self.config.firewall_id,
             metadata: MetadataRequest {
                 user_data: bootstrap.user_data_base64,
             },
@@ -855,8 +855,7 @@ struct CreateInstanceRequest {
     booted: bool,
     authorized_keys: Vec<String>,
     tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    firewall_id: Option<u64>,
+    firewall_id: u64,
     metadata: MetadataRequest,
 }
 
@@ -930,15 +929,17 @@ impl ProviderInstance {
         image: &str,
     ) -> Result<(), AkamaiComputeError> {
         if self.region != region || self.instance_type != instance_type || self.image != image {
-            return Err(AkamaiComputeError::ProviderConfigurationMismatch {
-                provider_instance_id: self.id,
-                expected_region: region.to_owned(),
-                observed_region: self.region.clone(),
-                expected_type: instance_type.to_owned(),
-                observed_type: self.instance_type.clone(),
-                expected_image: image.to_owned(),
-                observed_image: self.image.clone(),
-            });
+            return Err(AkamaiComputeError::ProviderConfigurationMismatch(
+                Box::new(AkamaiProviderConfigurationMismatch {
+                    provider_instance_id: self.id,
+                    expected_region: region.to_owned(),
+                    observed_region: self.region.clone(),
+                    expected_type: instance_type.to_owned(),
+                    observed_type: self.instance_type.clone(),
+                    expected_image: image.to_owned(),
+                    observed_image: self.image.clone(),
+                }),
+            ));
         }
         Ok(())
     }
@@ -987,6 +988,20 @@ impl AkamaiComputeError {
 }
 
 #[derive(Debug, Error)]
+#[error(
+    "Akamai instance {provider_instance_id} configuration differs from the resolved specification: region {observed_region} (expected {expected_region}), type {observed_type} (expected {expected_type}), image {observed_image} (expected {expected_image})"
+)]
+pub struct AkamaiProviderConfigurationMismatch {
+    provider_instance_id: u64,
+    expected_region: String,
+    observed_region: String,
+    expected_type: String,
+    observed_type: String,
+    expected_image: String,
+    observed_image: String,
+}
+
+#[derive(Debug, Error)]
 pub enum AkamaiComputeError {
     #[error("Akamai provider used for a non-Akamai compute specification")]
     WrongProvider,
@@ -1000,11 +1015,8 @@ pub enum AkamaiComputeError {
     ImageNotAllowed { requested: String, allowed: String },
     #[error("Akamai instance type is not allowed: {0}")]
     InstanceTypeNotAllowed(String),
-    #[error("Akamai firewall {requested:?} is not allowed; required firewall is {required}")]
-    FirewallNotAllowed {
-        requested: Option<u64>,
-        required: u64,
-    },
+    #[error("Akamai firewall {requested} is not allowed; required firewall is {required}")]
+    FirewallNotAllowed { requested: u64, required: u64 },
     #[error("Akamai managed instance limit is already reached: active={active}, maximum={maximum}")]
     ActiveInstanceLimitReached { active: usize, maximum: usize },
     #[error(
@@ -1028,18 +1040,8 @@ pub enum AkamaiComputeError {
         provider_instance_id: u64,
         expected_label: String,
     },
-    #[error(
-        "Akamai instance {provider_instance_id} configuration differs from the resolved specification: region {observed_region} (expected {expected_region}), type {observed_type} (expected {expected_type}), image {observed_image} (expected {expected_image})"
-    )]
-    ProviderConfigurationMismatch {
-        provider_instance_id: u64,
-        expected_region: String,
-        observed_region: String,
-        expected_type: String,
-        observed_type: String,
-        expected_image: String,
-        observed_image: String,
-    },
+    #[error(transparent)]
+    ProviderConfigurationMismatch(Box<AkamaiProviderConfigurationMismatch>),
     #[error(
         "Akamai instance type response identity mismatch: expected {expected}, observed {observed}"
     )]
@@ -1118,7 +1120,7 @@ mod tests {
             booted: true,
             authorized_keys: vec!["ssh-ed25519 test".to_owned()],
             tags: vec!["mcserver-managed".to_owned()],
-            firewall_id: Some(123),
+            firewall_id: 123,
             metadata: MetadataRequest {
                 user_data: "dGVzdA==".to_owned(),
             },
@@ -1127,6 +1129,7 @@ mod tests {
 
         assert_eq!(value["type"], json!("g6-nanode-1"));
         assert!(value.get("instance_type").is_none());
+        assert_eq!(value["firewall_id"], json!(123));
         assert_eq!(value["metadata"]["user_data"], json!("dGVzdA=="));
         Ok(())
     }

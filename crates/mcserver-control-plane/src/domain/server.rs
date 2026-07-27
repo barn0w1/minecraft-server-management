@@ -122,8 +122,7 @@ pub enum ComputeSpec {
         region: String,
         instance_type: String,
         image: String,
-        #[serde(default)]
-        firewall_id: Option<u64>,
+        firewall_id: u64,
     },
 }
 
@@ -160,7 +159,7 @@ impl ComputeSpec {
                 });
             }
         }
-        if firewall_id.is_some_and(|value| value == 0) {
+        if *firewall_id == 0 {
             return Err(ValidationError::ZeroValue("compute.firewall_id"));
         }
         Ok(())
@@ -508,7 +507,7 @@ mod tests {
             region: "jp-tyo-3".to_owned(),
             instance_type: "g6-nanode-1".to_owned(),
             image: "linode/debian13".to_owned(),
-            firewall_id: Some(123),
+            firewall_id: 123,
         };
 
         assert!(spec.validate().is_ok());
@@ -521,7 +520,7 @@ mod tests {
             region: "us east".to_owned(),
             instance_type: "g6-nanode-1".to_owned(),
             image: "linode/debian13".to_owned(),
-            firewall_id: None,
+            firewall_id: 123,
         };
 
         assert!(matches!(
@@ -530,6 +529,22 @@ mod tests {
                 field: "compute.region",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_akamai_firewall_id() {
+        let mut spec = valid_spec();
+        spec.compute = ComputeSpec::Akamai {
+            region: "jp-tyo-3".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
+            firewall_id: 0,
+        };
+
+        assert!(matches!(
+            spec.validate(),
+            Err(ValidationError::ZeroValue("compute.firewall_id"))
         ));
     }
 }

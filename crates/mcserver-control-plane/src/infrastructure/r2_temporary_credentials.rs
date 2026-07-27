@@ -302,7 +302,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "mcserver",
         );
-        assert_eq!(result.as_deref(), Ok("server-1/restic/"));
+        assert_eq!(result.as_deref().ok(), Some("server-1/restic/"));
     }
 
     #[test]

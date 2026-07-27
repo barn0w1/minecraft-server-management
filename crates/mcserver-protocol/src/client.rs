@@ -50,8 +50,7 @@ pub enum ComputeSpec {
         region: String,
         instance_type: String,
         image: String,
-        #[serde(default)]
-        firewall_id: Option<u64>,
+        firewall_id: u64,
     },
 }
 

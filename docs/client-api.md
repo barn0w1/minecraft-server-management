@@ -72,7 +72,7 @@ For an Akamai-backed Server, `compute` is provider-tagged:
 }
 ```
 
-`region`, `instance_type`, and `image` are passed to the Linode create API. `firewall_id` is optional. Provider credentials and remote-agent bootstrap settings are control-plane configuration, never client API fields.
+`region`, `instance_type`, `image`, and `firewall_id` are required and passed to the Linode create API. Provider credentials and remote-agent bootstrap settings are control-plane configuration, never client API fields.
 
 ### `server.get`
 
@@ -139,6 +139,6 @@ mcserverctl [--socket PATH] server stop SERVER_ID
 mcserverctl [--socket PATH] server create --name NAME --repository REPOSITORY --accept-eula [--compute local|akamai] ...
 ```
 
-For Akamai creation, use `--compute akamai` with `--akamai-region`, `--akamai-type`, `--akamai-image`, and optional `--akamai-firewall-id`.
+For Akamai creation, use `--compute akamai` with `--akamai-region`, `--akamai-type`, `--akamai-image`, and `--akamai-firewall-id`.
 
 Start and stop first read the current generation and send an optimistic desired-state update. Mutations still have the same JSON-RPC semantics as direct clients.

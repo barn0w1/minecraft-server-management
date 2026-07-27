@@ -93,6 +93,8 @@ pub struct RemoteAgentConfig {
     pub trust_domain: String,
     pub node_agent_download_url: String,
     pub node_agent_sha256: String,
+    pub max_frame_bytes: usize,
+    pub node_operation_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -248,7 +250,7 @@ impl Config {
             "MCSERVER_CONTROL_PLANE_LOCAL_PROCESS_STOP_TIMEOUT_SECONDS",
             DEFAULT_LOCAL_PROCESS_STOP_TIMEOUT_SECONDS,
         )?;
-        let remote_agent = remote_agent_config()?;
+        let remote_agent = remote_agent_config(max_frame_bytes, agent_command_timeout)?;
         let akamai = akamai_config(remote_agent.as_ref())?;
         let r2 = r2_config(akamai.as_ref(), agent_command_timeout)?;
 
@@ -276,7 +278,17 @@ impl Config {
     }
 }
 
-fn remote_agent_config() -> Result<Option<RemoteAgentConfig>, ConfigError> {
+pub(crate) fn node_operation_timeout(agent_call_timeout: Duration) -> Duration {
+    agent_call_timeout
+        .checked_sub(Duration::from_secs(5))
+        .filter(|duration| !duration.is_zero())
+        .unwrap_or(Duration::from_secs(1))
+}
+
+fn remote_agent_config(
+    max_frame_bytes: usize,
+    agent_command_timeout: Duration,
+) -> Result<Option<RemoteAgentConfig>, ConfigError> {
     let Some(listen_value) =
         optional_string_value("MCSERVER_CONTROL_PLANE_REMOTE_AGENT_LISTEN_ADDRESS")?
     else {
@@ -357,6 +369,8 @@ fn remote_agent_config() -> Result<Option<RemoteAgentConfig>, ConfigError> {
         trust_domain,
         node_agent_download_url,
         node_agent_sha256: node_agent_sha256.to_ascii_lowercase(),
+        max_frame_bytes,
+        node_operation_timeout: node_operation_timeout(agent_command_timeout),
     }))
 }
 
