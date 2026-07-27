@@ -929,8 +929,8 @@ impl ProviderInstance {
         image: &str,
     ) -> Result<(), AkamaiComputeError> {
         if self.region != region || self.instance_type != instance_type || self.image != image {
-            return Err(AkamaiComputeError::ProviderConfigurationMismatch(
-                Box::new(AkamaiProviderConfigurationMismatch {
+            return Err(AkamaiComputeError::ProviderConfigurationMismatch(Box::new(
+                AkamaiProviderConfigurationMismatch {
                     provider_instance_id: self.id,
                     expected_region: region.to_owned(),
                     observed_region: self.region.clone(),
@@ -938,8 +938,8 @@ impl ProviderInstance {
                     observed_type: self.instance_type.clone(),
                     expected_image: image.to_owned(),
                     observed_image: self.image.clone(),
-                }),
-            ));
+                },
+            )));
         }
         Ok(())
     }
