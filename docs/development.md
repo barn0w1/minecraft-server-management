@@ -45,7 +45,7 @@ The root file declares child modules and explicitly re-exports the public surfac
 ## State and reconciliation
 
 - The database is authoritative; queue sends are best effort.
-- External operations must be idempotent or recoverable after uncertain responses.
+- External operations must be idempotent or recoverable after uncertain responses. Provider creates use deterministic identity and discovery before retrying.
 - Persist observations, not one combined global phase.
 - Isolate a Server's reconciliation error from the daemon and other Servers.
 - Enforce concurrency invariants in SQLite as well as in code.
@@ -71,7 +71,7 @@ Schema constraints must mirror domain invariants. Migration files are immutable 
 - use argument APIs, never shell interpolation
 - set `kill_on_drop(true)` for bounded command execution
 - capture stdout/stderr and include a bounded diagnostic on failure
-- use deterministic resource names and complete ownership labels
+- use deterministic resource names and complete ownership labels; revalidate ownership before destructive provider calls
 - scope local runtime resources so cleanup never targets another control-plane installation
 - verify an untracked PID still belongs to the intended local agent before signaling it
 - treat timeout responses as uncertain and do not reuse a desynchronized RPC session
@@ -104,6 +104,21 @@ Use the cheapest layer that proves the change:
 1. unit tests for domain rules, parsers, and retry calculations
 2. `scripts/deterministic_e2e.py` for daemon, transport, persistence, reconciliation, retry, and cleanup behavior
 3. `scripts/local_e2e.py --skip-port-check` for real Podman/restic infrastructure
-4. `scripts/local_e2e.py` for actual Minecraft readiness and two-generation data recovery
+4. `scripts/remote_provider_e2e.py` for TLS enrollment, the real HTTP adapter, uncertain-response recovery, and remote lifecycle
+5. `scripts/local_e2e.py` for actual Minecraft readiness and two-generation data recovery
 
 Fake executables must model command-line contracts and persistent observations, not reimplement production business rules.
+## External HTTP providers
+
+- Use an official API specification as the contract; keep provider DTOs inside the adapter.
+- Configure a bounded request timeout and preserve structured provider errors.
+- Treat `429` as scheduling information and honor a valid `Retry-After`.
+- Search by deterministic identity before create and after uncertain create responses.
+- Treat not-found delete as converged absence.
+- Never delete using a provider ID alone; verify the expected label and ownership scope.
+- Redact bearer tokens and per-compute credentials from `Debug` output.
+- Allow plaintext HTTP only for an explicitly loopback test endpoint.
+
+## Node data ownership
+
+`MCSERVER_NODE_AGENT_DATA_ACCESS_MODE` accepts `auto`, `podman_user_namespace`, or `host`. `auto` chooses host access for an effective UID of zero and Podman user-namespace access otherwise. Local rootless execution should use the namespace mode; the remote root systemd bootstrap sets host mode explicitly. Restic, directory swaps, and recursive cleanup must all use the selected mode.

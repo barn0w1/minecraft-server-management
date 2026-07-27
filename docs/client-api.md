@@ -60,6 +60,20 @@ The following environment keys are system-owned and rejected in `environment`:
 
 The system sets `SKIP_SERVER_PROPERTIES=TRUE`; files under `/data`, including `server.properties`, remain outside the control-plane configuration model.
 
+For an Akamai-backed Server, `compute` is provider-tagged:
+
+```json
+{
+  "provider": "akamai",
+  "region": "jp-tyo-3",
+  "instance_type": "g6-nanode-1",
+  "image": "linode/debian13",
+  "firewall_id": 123
+}
+```
+
+`region`, `instance_type`, and `image` are passed to the Linode create API. `firewall_id` is optional. Provider credentials and remote-agent bootstrap settings are control-plane configuration, never client API fields.
+
 ### `server.get`
 
 Params: `server_id` UUID.
@@ -122,7 +136,9 @@ mcserverctl [--socket PATH] server status SERVER_ID
 mcserverctl [--socket PATH] server instances SERVER_ID
 mcserverctl [--socket PATH] server start SERVER_ID
 mcserverctl [--socket PATH] server stop SERVER_ID
-mcserverctl [--socket PATH] server create --name NAME --repository PATH --accept-eula ...
+mcserverctl [--socket PATH] server create --name NAME --repository REPOSITORY --accept-eula [--compute local|akamai] ...
 ```
+
+For Akamai creation, use `--compute akamai` with `--akamai-region`, `--akamai-type`, `--akamai-image`, and optional `--akamai-firewall-id`.
 
 Start and stop first read the current generation and send an optimistic desired-state update. Mutations still have the same JSON-RPC semantics as direct clients.

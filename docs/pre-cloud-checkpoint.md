@@ -1,6 +1,6 @@
 # Pre-cloud checkpoint
 
-This checkpoint is the stable boundary immediately before adding remote node enrollment and an Akamai Cloud compute provider.
+This historical checkpoint is the stable local boundary that preceded remote node enrollment and the Akamai Cloud provider. The deferred items are now addressed by [the remote provider checkpoint](remote-provider-checkpoint.md).
 
 ## Acceptance criteria
 
@@ -34,7 +34,7 @@ The next provider must preserve these contracts:
 - uncertain external responses are reconciled by provider identity, never by blindly creating another resource
 - queue delivery is an optimization; the database and periodic resync remain authoritative
 
-## Intentionally deferred to the cloud checkpoint
+## Items handed to the remote provider checkpoint
 
 - remote agent TLS identity and one-time enrollment
 - provider-neutral compute allocation backed by Akamai Cloud
@@ -43,4 +43,4 @@ The next provider must preserve these contracts:
 - object-storage credentials and R2-backed restic repositories
 - cloud orphan discovery, API rate limiting, and uncertain-create recovery
 
-Those items should be implemented together as one remote vertical slice. Exposing the current loopback token protocol or direct-Podman local executor over a public network is not an acceptable intermediate deployment.
+Those items were implemented together as the remote provider checkpoint. The loopback listener remains local-only; public agent traffic uses a separate TLS listener and one-time enrollment flow.
