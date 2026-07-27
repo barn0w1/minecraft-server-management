@@ -12,6 +12,8 @@ use crate::{
 const MAX_AUTHORIZED_KEYS_BYTES: usize = 64 * 1024;
 const MAX_CA_BYTES: usize = 64 * 1024;
 const REMOTE_STATE_DIRECTORY: &str = "/var/lib/mcserver/node-agent";
+const CONTAINER_STORAGE_DIRECTORY: &str = "/var/lib/containers";
+const CONTAINER_RUNTIME_DIRECTORY: &str = "/run/containers";
 const REMOTE_BINARY_PATH: &str = "/usr/local/bin/mcserver-node-agent";
 const REMOTE_CA_PATH: &str = "/etc/mcserver/control-plane-ca.pem";
 const REMOTE_ENV_PATH: &str = "/etc/mcserver/node-agent.env";
@@ -73,7 +75,8 @@ install_packages() {{
 }}
 
 install_packages
-install -d -m 0700 /etc/mcserver {state_directory}
+install -d -m 0700 /etc/mcserver {state_directory} {container_storage_directory}
+install -d -m 0755 {container_runtime_directory}
 printf '%s' '{ca_base64}' | base64 -d > {ca_path}
 cat > {env_path} <<'MCSERVER_AGENT_ENV'
 MCSERVER_NODE_AGENT_CONTROL_PLANE_ADDRESS={control_plane_address}
@@ -100,6 +103,8 @@ systemctl daemon-reload
 systemctl enable --now mcserver-node-agent.service
 "#,
         state_directory = REMOTE_STATE_DIRECTORY,
+        container_storage_directory = CONTAINER_STORAGE_DIRECTORY,
+        container_runtime_directory = CONTAINER_RUNTIME_DIRECTORY,
         ca_path = REMOTE_CA_PATH,
         env_path = REMOTE_ENV_PATH,
         control_plane_address = shell_value(&remote.public_address),
@@ -169,7 +174,8 @@ ProtectHome=true
 ProtectSystem=strict
 ProtectKernelTunables=true
 ProtectKernelModules=true
-RestrictSUIDSGID=true
+# Rootful Podman needs to restore setuid/setgid mode bits while unpacking images.
+RestrictSUIDSGID=false
 LockPersonality=true
 Delegate=yes
 TasksMax=infinity
@@ -193,6 +199,19 @@ fn shell_value(value: &str) -> String {
     }
     escaped.push('\'');
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::systemd_unit;
+
+    #[test]
+    fn node_agent_unit_allows_rootful_podman_to_unpack_setid_files() {
+        let unit = systemd_unit();
+
+        assert!(unit.contains("RestrictSUIDSGID=false\n"));
+        assert!(!unit.contains("RestrictSUIDSGID=true\n"));
+    }
 }
 
 #[derive(Debug, Serialize)]
