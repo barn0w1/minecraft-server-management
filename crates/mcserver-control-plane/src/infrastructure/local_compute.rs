@@ -9,8 +9,10 @@ use std::{
 };
 
 use mcserver_protocol::node_agent::{ShutdownResult, method};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
+    io::AsyncWriteExt,
     process::{Child, Command},
     sync::Mutex,
 };
@@ -26,6 +28,10 @@ use crate::{
 };
 
 use super::{ComputeInstanceRepository, RepositoryError};
+
+const LOCAL_RUNTIME_STATE_FILE_NAME: &str = "local-runtime.json";
+const LOCAL_RUNTIME_STATE_SCHEMA_VERSION: u32 = 1;
+const LINUX_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 
 #[derive(Clone)]
 pub struct LocalComputeManager {
@@ -147,20 +153,6 @@ impl LocalComputeManager {
             info!(container = name, "removed orphaned managed container");
         }
 
-        for (process_id, compute_id) in list_processes_for_scope(&self.local_scope).await? {
-            if active_computes.contains_key(&compute_id) {
-                continue;
-            }
-            wait_for_untracked_process_exit(
-                process_id,
-                compute_id,
-                &self.local_scope,
-                self.process_stop_timeout,
-            )
-            .await?;
-            summary.processes_stopped = summary.processes_stopped.saturating_add(1);
-        }
-
         let mut entries = match tokio::fs::read_dir(&self.node_agent_root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(summary),
@@ -182,12 +174,57 @@ impl LocalComputeManager {
             if active_computes.contains_key(&compute_id) {
                 continue;
             }
+            if self
+                .stop_process_from_runtime_state(&entry.path(), compute_id)
+                .await?
+            {
+                summary.processes_stopped = summary.processes_stopped.saturating_add(1);
+            }
             self.remove_state_directory_in_user_namespace(&entry.path())
                 .await?;
             summary.state_directories_removed = summary.state_directories_removed.saturating_add(1);
             info!(compute_instance_id = %compute_id, "removed orphaned local compute state");
         }
         Ok(summary)
+    }
+
+    async fn stop_process_from_runtime_state(
+        &self,
+        state_directory: &std::path::Path,
+        compute_instance_id: ComputeInstanceId,
+    ) -> Result<bool, LocalComputeError> {
+        let Some(runtime_state) = load_local_runtime_state(state_directory).await? else {
+            warn!(
+                compute_instance_id = %compute_instance_id,
+                path = %state_directory.display(),
+                "orphaned local compute state has no runtime metadata"
+            );
+            return Ok(false);
+        };
+        if runtime_state.compute_instance_id != compute_instance_id.as_uuid()
+            || runtime_state.local_scope != self.local_scope
+        {
+            warn!(
+                compute_instance_id = %compute_instance_id,
+                path = %state_directory.display(),
+                "orphaned local compute runtime metadata does not match its owner"
+            );
+            return Ok(false);
+        }
+        if !runtime_process_matches(&runtime_state).await? {
+            return Ok(false);
+        }
+        wait_for_untracked_process_exit(
+            &runtime_state,
+            self.process_stop_timeout,
+        )
+        .await?;
+        info!(
+            compute_instance_id = %compute_instance_id,
+            process_id = runtime_state.process_id,
+            "stopped orphaned local node-agent process"
+        );
+        Ok(true)
     }
 
     async fn run_podman_control<const N: usize>(
@@ -311,13 +348,18 @@ impl LocalComputeManager {
                 wait_for_tracked_process_exit(child, self.process_stop_timeout).await?;
             }
             (None, Some(process_id)) => {
-                wait_for_untracked_process_exit(
-                    process_id,
-                    compute.id,
-                    &self.local_scope,
-                    self.process_stop_timeout,
-                )
-                .await?;
+                if let Some(runtime_state) =
+                    load_local_runtime_state(&self.state_directory(compute.id)).await?
+                    && runtime_state.process_id == process_id
+                    && runtime_state.compute_instance_id == compute.id.as_uuid()
+                    && runtime_state.local_scope == self.local_scope
+                {
+                    wait_for_untracked_process_exit(
+                        &runtime_state,
+                        self.process_stop_timeout,
+                    )
+                    .await?;
+                }
             }
             (None, None) => {}
         }
@@ -352,12 +394,17 @@ impl LocalComputeManager {
             }
         }
 
-        match compute.process_id {
-            Some(process_id) => {
-                Ok(process_matches_compute(process_id, compute.id, &self.local_scope).await?)
-            }
-            None => Ok(false),
-        }
+        let Some(process_id) = compute.process_id else {
+            return Ok(false);
+        };
+        let Some(runtime_state) = load_local_runtime_state(&self.state_directory(compute.id)).await?
+        else {
+            return Ok(false);
+        };
+        Ok(runtime_state.process_id == process_id
+            && runtime_state.compute_instance_id == compute.id.as_uuid()
+            && runtime_state.local_scope == self.local_scope
+            && runtime_process_matches(&runtime_state).await?)
     }
 
     async fn spawn_agent(
@@ -408,6 +455,23 @@ impl LocalComputeManager {
             terminate_spawned_child(&mut child, compute.id).await;
             return Err(LocalComputeError::MissingProcessId);
         };
+        let runtime_state = match capture_local_runtime_state(
+            process_id,
+            compute.id,
+            &self.local_scope,
+        )
+        .await
+        {
+            Ok(runtime_state) => runtime_state,
+            Err(error) => {
+                terminate_spawned_child(&mut child, compute.id).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = store_local_runtime_state(&state_directory, &runtime_state).await {
+            terminate_spawned_child(&mut child, compute.id).await;
+            return Err(error);
+        }
         info!(
             compute_instance_id = %compute.id,
             process_id,
@@ -446,66 +510,120 @@ async fn terminate_spawned_child(child: &mut Child, compute_id: ComputeInstanceI
     }
 }
 
-async fn list_processes_for_scope(
-    local_scope: &str,
-) -> Result<Vec<(u32, ComputeInstanceId)>, std::io::Error> {
-    let mut matches = Vec::new();
-    let mut entries = tokio::fs::read_dir("/proc").await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(process_id) = name.parse::<u32>() else {
-            continue;
-        };
-        match process_runtime_identity(process_id).await {
-            Ok(Some((compute_id, process_scope))) if process_scope == local_scope => {
-                matches.push((process_id, compute_id));
-            }
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(matches)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalRuntimeState {
+    schema_version: u32,
+    compute_instance_id: Uuid,
+    local_scope: String,
+    process_id: u32,
+    linux_boot_id: String,
+    linux_process_start_time_ticks: u64,
 }
 
-async fn process_matches_compute(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxProcessState {
+    state: char,
+    start_time_ticks: u64,
+}
+
+async fn capture_local_runtime_state(
     process_id: u32,
     compute_instance_id: ComputeInstanceId,
     local_scope: &str,
-) -> Result<bool, std::io::Error> {
-    Ok(process_runtime_identity(process_id)
-        .await?
-        .is_some_and(|(id, scope)| id == compute_instance_id && scope == local_scope))
+) -> Result<LocalRuntimeState, LocalComputeError> {
+    let linux_boot_id = read_linux_boot_id().await?;
+    let process_state = read_linux_process_state(process_id).await?;
+    Ok(LocalRuntimeState {
+        schema_version: LOCAL_RUNTIME_STATE_SCHEMA_VERSION,
+        compute_instance_id: compute_instance_id.as_uuid(),
+        local_scope: local_scope.to_owned(),
+        process_id,
+        linux_boot_id,
+        linux_process_start_time_ticks: process_state.start_time_ticks,
+    })
 }
 
-async fn process_runtime_identity(
-    process_id: u32,
-) -> Result<Option<(ComputeInstanceId, String)>, std::io::Error> {
-    let environment_path = PathBuf::from(format!("/proc/{process_id}/environ"));
-    let environment = match tokio::fs::read(environment_path).await {
-        Ok(value) => value,
+async fn store_local_runtime_state(
+    state_directory: &std::path::Path,
+    state: &LocalRuntimeState,
+) -> Result<(), LocalComputeError> {
+    let path = state_directory.join(LOCAL_RUNTIME_STATE_FILE_NAME);
+    let temporary = state_directory.join(format!("{LOCAL_RUNTIME_STATE_FILE_NAME}.tmp"));
+    let encoded = serde_json::to_vec_pretty(state)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .await?;
+    file.write_all(&encoded).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, path).await?;
+    let directory = tokio::fs::File::open(state_directory).await?;
+    directory.sync_all().await?;
+    Ok(())
+}
+
+async fn load_local_runtime_state(
+    state_directory: &std::path::Path,
+) -> Result<Option<LocalRuntimeState>, LocalComputeError> {
+    let path = state_directory.join(LOCAL_RUNTIME_STATE_FILE_NAME);
+    let encoded = match tokio::fs::read(path).await {
+        Ok(encoded) => encoded,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
-    let mut compute_id = None;
-    let mut local_scope = None;
-    for entry in environment.split(|byte| *byte == 0) {
-        if let Some(value) = entry.strip_prefix(b"MCSERVER_NODE_AGENT_COMPUTE_INSTANCE_ID=") {
-            compute_id = std::str::from_utf8(value)
-                .ok()
-                .and_then(|value| value.parse::<Uuid>().ok())
-                .map(ComputeInstanceId::from_uuid);
-        } else if let Some(value) = entry.strip_prefix(b"MCSERVER_NODE_AGENT_LOCAL_SCOPE=") {
-            local_scope = std::str::from_utf8(value).ok().map(str::to_owned);
-        }
+    let state = serde_json::from_slice::<LocalRuntimeState>(&encoded)?;
+    if state.schema_version != LOCAL_RUNTIME_STATE_SCHEMA_VERSION {
+        return Err(LocalComputeError::UnsupportedRuntimeStateSchemaVersion(
+            state.schema_version,
+        ));
     }
-    Ok(compute_id.zip(local_scope))
+    Ok(Some(state))
+}
+
+async fn runtime_process_matches(
+    runtime_state: &LocalRuntimeState,
+) -> Result<bool, LocalComputeError> {
+    if read_linux_boot_id().await? != runtime_state.linux_boot_id {
+        return Ok(false);
+    }
+    let current = match read_linux_process_state(runtime_state.process_id).await {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(!matches!(current.state, 'Z' | 'X' | 'x')
+        && current.start_time_ticks == runtime_state.linux_process_start_time_ticks)
+}
+
+async fn read_linux_boot_id() -> Result<String, std::io::Error> {
+    Ok(tokio::fs::read_to_string(LINUX_BOOT_ID_PATH)
+        .await?
+        .trim()
+        .to_owned())
+}
+
+async fn read_linux_process_state(process_id: u32) -> Result<LinuxProcessState, std::io::Error> {
+    let encoded = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
+    parse_linux_process_stat(&encoded).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid /proc/{process_id}/stat data"),
+        )
+    })
+}
+
+fn parse_linux_process_stat(value: &str) -> Option<LinuxProcessState> {
+    let command_end = value.rfind(')')?;
+    let mut fields = value.get(command_end + 1..)?.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start_time_ticks = fields.nth(18)?.parse::<u64>().ok()?;
+    Some(LinuxProcessState {
+        state,
+        start_time_ticks,
+    })
 }
 
 async fn wait_for_tracked_process_exit(
@@ -527,33 +645,31 @@ async fn wait_for_tracked_process_exit(
 }
 
 async fn wait_for_untracked_process_exit(
-    process_id: u32,
-    compute_instance_id: ComputeInstanceId,
-    local_scope: &str,
+    runtime_state: &LocalRuntimeState,
     timeout: Duration,
 ) -> Result<(), LocalComputeError> {
-    if !process_matches_compute(process_id, compute_instance_id, local_scope).await? {
+    if !runtime_process_matches(runtime_state).await? {
         return Ok(());
     }
 
-    send_signal(process_id, "TERM").await?;
+    send_signal(runtime_state.process_id, "TERM").await?;
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if !process_matches_compute(process_id, compute_instance_id, local_scope).await? {
+        if !runtime_process_matches(runtime_state).await? {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    send_signal(process_id, "KILL").await?;
+    send_signal(runtime_state.process_id, "KILL").await?;
     let kill_started = Instant::now();
     while kill_started.elapsed() < Duration::from_secs(2) {
-        if !process_matches_compute(process_id, compute_instance_id, local_scope).await? {
+        if !runtime_process_matches(runtime_state).await? {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err(LocalComputeError::ProcessDidNotExit(process_id))
+    Err(LocalComputeError::ProcessDidNotExit(runtime_state.process_id))
 }
 
 async fn send_signal(process_id: u32, signal: &str) -> Result<(), LocalComputeError> {
@@ -592,6 +708,10 @@ pub enum LocalComputeError {
     Repository(#[from] RepositoryError),
     #[error("local compute filesystem or process operation failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("local runtime metadata serialization failed: {0}")]
+    RuntimeStateSerialization(#[from] serde_json::Error),
+    #[error("unsupported local runtime metadata schema version {0}")]
+    UnsupportedRuntimeStateSchemaVersion(u32),
     #[error("local compute timestamp generation failed: {0}")]
     Timestamp(#[from] crate::domain::TimestampError),
     #[error("Podman output was not valid UTF-8")]
@@ -626,7 +746,7 @@ pub enum LocalComputeError {
 mod tests {
     use std::time::Duration;
 
-    use super::node_operation_timeout;
+    use super::{node_operation_timeout, parse_linux_process_stat, LinuxProcessState};
 
     #[test]
     fn node_operation_timeout_leaves_response_budget() {
@@ -638,5 +758,22 @@ mod tests {
             node_operation_timeout(Duration::from_secs(3)),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn parses_linux_process_stat_with_spaces_and_parentheses_in_name() {
+        let stat = "42 (node agent (test)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
+        assert_eq!(
+            parse_linux_process_stat(stat),
+            Some(LinuxProcessState {
+                state: 'S',
+                start_time_ticks: 987654,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_linux_process_stat() {
+        assert_eq!(parse_linux_process_stat("42 (agent) S 1 2"), None);
     }
 }

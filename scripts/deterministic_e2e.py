@@ -53,6 +53,43 @@ def load_fake_containers(runtime: Path) -> dict[str, object]:
     return containers
 
 
+def linux_process_start_time_ticks(process_id: int) -> int:
+    value = Path(f"/proc/{process_id}/stat").read_text()
+    command_end = value.rfind(")")
+    if command_end < 0:
+        raise RuntimeError(f"invalid /proc/{process_id}/stat data")
+    fields = value[command_end + 1 :].split()
+    if len(fields) <= 19:
+        raise RuntimeError(f"truncated /proc/{process_id}/stat data")
+    return int(fields[19])
+
+
+def write_runtime_state(
+    state_directory: Path,
+    compute_instance_id: str,
+    local_scope: str,
+    process_id: int,
+) -> None:
+    state = {
+        "schema_version": 1,
+        "compute_instance_id": compute_instance_id,
+        "local_scope": local_scope,
+        "process_id": process_id,
+        "linux_boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "linux_process_start_time_ticks": linux_process_start_time_ticks(process_id),
+    }
+    (state_directory / "local-runtime.json").write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def log_tail(path: Path, maximum_lines: int = 120) -> str:
+    if not path.exists():
+        return ""
+    lines = path.read_text(errors="replace").splitlines()
+    return "\n".join(lines[-maximum_lines:])
+
+
 def seed_orphans(
     podman: Path,
     runtime: Path,
@@ -106,6 +143,12 @@ def seed_orphans(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+    )
+    write_runtime_state(
+        orphan_directory,
+        orphan_compute,
+        local_scope,
+        orphan_process.pid,
     )
     return orphan_instance, orphan_directory, orphan_process
 
@@ -337,6 +380,11 @@ def main() -> int:
         return 0
     except (OSError, RuntimeError, TimeoutError, subprocess.CalledProcessError) as error:
         print(f"deterministic local E2E failed: {error}", file=sys.stderr)
+        captured_log = log_tail(control_plane_log)
+        if captured_log:
+            print("--- control-plane.log (tail) ---", file=sys.stderr)
+            print(captured_log, file=sys.stderr)
+            print("--- end control-plane.log ---", file=sys.stderr)
         print(f"artifacts retained at {work_directory}", file=sys.stderr)
         return 1
     finally:
