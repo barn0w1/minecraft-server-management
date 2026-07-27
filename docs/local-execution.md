@@ -15,7 +15,7 @@ For every active ServerInstance, the control plane creates a ComputeInstance row
 - loopback control-plane address
 - private state directory
 
-The agent connects outward, registers, and then accepts serialized JSON-RPC commands. The control plane passes the same frame limit and a slightly shorter external-operation timeout to the child agent, leaving time for a structured error response before the control-plane RPC watchdog expires. Its versioned durable state file binds the private directory to one ServerInstance UUID and fencing token, rejecting stale commands. State updates use a write-sync-rename-directory-sync sequence so a completed snapshot ID survives control-plane reconnects and ordinary host crashes as reliably as the local filesystem permits.
+The agent connects outward, registers, and then accepts serialized JSON-RPC commands. The control plane passes the same frame limit and a slightly shorter external-operation timeout to the child agent, leaving time for a structured error response before the control-plane RPC watchdog expires. Before recording the child PID in SQLite, the control plane atomically writes `local-runtime.json` with the ComputeInstance ID, local scope, PID, Linux boot ID, and process start time. This lets a restarted control plane verify a process without reading `/proc/<pid>/environ`, which can be denied by Fedora's procfs/ptrace policy, and prevents signaling a different process after PID reuse. The agent's separate versioned durable state file binds the private directory to one ServerInstance UUID and fencing token, rejecting stale commands. State updates use a write-sync-rename-directory-sync sequence so a completed snapshot ID survives control-plane reconnects and ordinary host crashes as reliably as the local filesystem permits.
 
 ## Data layout
 
@@ -23,6 +23,7 @@ A local agent directory is created with mode `0700` and contains:
 
 ```text
 <node-agent-root>/<compute-instance-id>/
+├── local-runtime.json
 ├── agent-state.json
 └── data/
 ```
@@ -88,7 +89,7 @@ The startup reaper handles scoped stale allocations during normal recovery. A fu
 
 Every local Minecraft container has labels for managed ownership, local scope, Server, ServerInstance, and ComputeInstance. `MCSERVER_CONTROL_PLANE_LOCAL_SCOPE` separates independent control-plane installations sharing one rootless Podman account.
 
-At startup, the control plane compares scoped managed containers and node-agent state directories with active database resources. It removes only resources whose ServerInstance or ComputeInstance is no longer active. This recovers containers and subordinate-ID-owned data left by an interrupted test or by replacing the local database. Set `MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START=false` only for diagnosis.
+At startup, the control plane compares scoped managed containers and node-agent state directories with active database resources. For an inactive state directory it verifies `local-runtime.json` against the current Linux boot ID and `/proc/<pid>/stat` start time before signaling the saved PID, then removes the subordinate-ID-owned directory through `podman unshare`. It does not scan arbitrary process environments. This recovers containers, agents, and data left by an interrupted test or by replacing the local database without risking an unrelated process that reused the same PID. Set `MCSERVER_CONTROL_PLANE_REAP_ORPHANS_ON_START=false` only for diagnosis.
 
 The E2E verifier attempts to bind the Podman publish port before creating a Server. An unavailable port is treated as an operator-visible conflict rather than entering an avoidable retry loop. Its failure cleanup is label-scoped and does not remove unrelated Podman containers.
 
