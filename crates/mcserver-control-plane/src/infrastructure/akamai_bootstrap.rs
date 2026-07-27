@@ -10,7 +10,7 @@ use crate::{
 };
 
 const MAX_AUTHORIZED_KEYS_BYTES: usize = 64 * 1024;
-const MAX_ENVIRONMENT_BYTES: usize = 64 * 1024;
+const MAX_CA_BYTES: usize = 64 * 1024;
 const REMOTE_STATE_DIRECTORY: &str = "/var/lib/mcserver/node-agent";
 const REMOTE_BINARY_PATH: &str = "/usr/local/bin/mcserver-node-agent";
 const REMOTE_CA_PATH: &str = "/etc/mcserver/control-plane-ca.pem";
@@ -26,14 +26,12 @@ pub struct BootstrapArtifacts {
 pub async fn build_bootstrap(
     remote: &RemoteAgentConfig,
     authorized_keys_file: &Path,
-    node_agent_environment_file: &Path,
     provider_scope: &str,
     instance: &ServerInstance,
     compute: &ComputeInstance,
 ) -> Result<BootstrapArtifacts, BootstrapError> {
     let authorized_keys = read_authorized_keys(authorized_keys_file).await?;
-    let environment = read_environment(node_agent_environment_file).await?;
-    let ca = read_bounded(&remote.tls_ca_certificate, MAX_ENVIRONMENT_BYTES).await?;
+    let ca = read_bounded(&remote.tls_ca_certificate, MAX_CA_BYTES).await?;
     if ca.contains(&0) {
         return Err(BootstrapError::CaContainsNul);
     }
@@ -43,7 +41,7 @@ pub async fn build_bootstrap(
         .as_deref()
         .ok_or(BootstrapError::MissingEnrollmentToken)?;
     let manifest = BootstrapManifest {
-        schema_version: 1,
+        schema_version: 2,
         compute_instance_id: compute.id.to_string(),
         server_instance_id: instance.id.to_string(),
         enrollment_token: enrollment_token.to_owned(),
@@ -51,10 +49,8 @@ pub async fn build_bootstrap(
         tls_server_name: remote.tls_server_name.clone(),
         provider_scope: provider_scope.to_owned(),
     };
-    let manifest_json = serde_json::to_vec(&manifest)?;
-    let manifest_base64 = STANDARD.encode(manifest_json);
+    let manifest_base64 = STANDARD.encode(serde_json::to_vec(&manifest)?);
     let ca_base64 = STANDARD.encode(ca);
-    let environment_base64 = STANDARD.encode(environment);
     let unit_base64 = STANDARD.encode(systemd_unit());
 
     let script = format!(
@@ -65,11 +61,11 @@ umask 077
 
 install_packages() {{
   if command -v dnf >/dev/null 2>&1; then
-    dnf -y install ca-certificates curl podman restic
+    dnf -y install ca-certificates curl openssl podman restic
   elif command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl podman restic
+    apt-get install -y ca-certificates curl openssl podman restic
   else
     echo 'unsupported distribution: dnf or apt-get is required' >&2
     exit 1
@@ -79,9 +75,7 @@ install_packages() {{
 install_packages
 install -d -m 0700 /etc/mcserver {state_directory}
 printf '%s' '{ca_base64}' | base64 -d > {ca_path}
-printf '%s' '{environment_base64}' | base64 -d > {env_path}
-printf '\n' >> {env_path}
-cat >> {env_path} <<'MCSERVER_AGENT_ENV'
+cat > {env_path} <<'MCSERVER_AGENT_ENV'
 MCSERVER_NODE_AGENT_CONTROL_PLANE_ADDRESS={control_plane_address}
 MCSERVER_NODE_AGENT_TLS_CA_CERTIFICATE={ca_path}
 MCSERVER_NODE_AGENT_TLS_SERVER_NAME={tls_server_name}
@@ -121,39 +115,6 @@ systemctl enable --now mcserver-node-agent.service
         authorized_keys,
         user_data_base64: STANDARD.encode(script),
     })
-}
-
-async fn read_environment(path: &Path) -> Result<Vec<u8>, BootstrapError> {
-    let bytes = read_bounded(path, MAX_ENVIRONMENT_BYTES).await?;
-    if bytes.contains(&0) {
-        return Err(BootstrapError::EnvironmentContainsNul);
-    }
-    let text = std::str::from_utf8(&bytes).map_err(BootstrapError::InvalidEnvironmentEncoding)?;
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            return Err(BootstrapError::InvalidEnvironmentLine(index + 1));
-        };
-        if !is_environment_key(key) {
-            return Err(BootstrapError::InvalidEnvironmentLine(index + 1));
-        }
-        if key.starts_with("MCSERVER_NODE_AGENT_") {
-            return Err(BootstrapError::ReservedEnvironmentKey(key.to_owned()));
-        }
-    }
-    Ok(bytes)
-}
-
-fn is_environment_key(key: &str) -> bool {
-    let mut bytes = key.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    (first == b'_' || first.is_ascii_alphabetic())
-        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 async fn read_authorized_keys(path: &Path) -> Result<Vec<String>, BootstrapError> {
@@ -197,10 +158,19 @@ EnvironmentFile=/etc/mcserver/node-agent.env
 ExecStart=/usr/local/bin/mcserver-node-agent
 Restart=on-failure
 RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers /run/user
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+Delegate=yes
+TasksMax=infinity
+KillMode=mixed
+ReadWritePaths=/var/lib/mcserver /var/lib/containers /run/containers
 
 [Install]
 WantedBy=multi-user.target
@@ -244,32 +214,10 @@ pub enum BootstrapError {
     NoAuthorizedKeys,
     #[error("authorized key contains a NUL byte")]
     AuthorizedKeyContainsNul,
-    #[error("node-agent environment file contains a NUL byte")]
-    EnvironmentContainsNul,
-    #[error("node-agent environment file is not UTF-8")]
-    InvalidEnvironmentEncoding(#[source] std::str::Utf8Error),
-    #[error("node-agent environment file line {0} must be KEY=VALUE")]
-    InvalidEnvironmentLine(usize),
-    #[error("node-agent environment file cannot set reserved key {0}")]
-    ReservedEnvironmentKey(String),
     #[error("TLS CA certificate contains a NUL byte")]
     CaContainsNul,
     #[error("Akamai compute instance has no enrollment token")]
     MissingEnrollmentToken,
     #[error("bootstrap manifest serialization failed")]
     Serialization(#[from] serde_json::Error),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_environment_key;
-
-    #[test]
-    fn environment_keys_follow_shell_identifier_rules() {
-        assert!(is_environment_key("RESTIC_PASSWORD"));
-        assert!(is_environment_key("_PRIVATE"));
-        assert!(!is_environment_key(""));
-        assert!(!is_environment_key("9INVALID"));
-        assert!(!is_environment_key("HAS-DASH"));
-    }
 }

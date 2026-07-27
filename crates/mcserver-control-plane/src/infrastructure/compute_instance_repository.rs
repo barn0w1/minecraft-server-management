@@ -83,11 +83,28 @@ const SELECT_ACTIVE_AKAMAI: &str = r#"
     ORDER BY id
 "#;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentAuthentication {
     Accepted,
-    ReplaceToken(String),
     Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCertificateRecord {
+    pub certificate_signing_request_pem: String,
+    pub certificate_chain_pem: String,
+    pub certificate_der: Vec<u8>,
+    pub certificate_expires_at: UnixTimestampMillis,
+    pub recorded_at: UnixTimestampMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEnrollment {
+    pub connection_token: String,
+    pub certificate_signing_request_pem: Option<String>,
+    pub certificate_chain_pem: Option<String>,
+    pub certificate_der: Option<Vec<u8>>,
+    pub certificate_expires_at: Option<UnixTimestampMillis>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,83 +270,158 @@ impl ComputeInstanceRepository {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn authenticate_agent(
+    pub async fn get_agent_enrollment(
         &self,
         id: ComputeInstanceId,
-        expected_provider: ComputeProvider,
-        presented_token: &str,
-        now: UnixTimestampMillis,
-    ) -> Result<AgentAuthentication, RepositoryError> {
-        let accepted = sqlx::query(
+        enrollment_token: &str,
+    ) -> Result<Option<AgentEnrollment>, RepositoryError> {
+        let row = sqlx::query(
             r#"
-            UPDATE compute_instances
-            SET
-                enrollment_token = CASE
-                    WHEN provider = 'akamai' THEN NULL
-                    ELSE enrollment_token
-                END,
-                agent_connected_at_ms = max(
-                    coalesce(agent_connected_at_ms, 0),
-                    ?,
-                    updated_at_ms,
-                    created_at_ms
-                ),
-                failure_message = NULL,
-                updated_at_ms = max(?, updated_at_ms, created_at_ms)
+            SELECT
+                connection_token,
+                agent_csr_pem,
+                agent_certificate_chain_pem,
+                agent_certificate_der,
+                agent_certificate_expires_at_ms
+            FROM compute_instances
             WHERE
                 id = ?
-                AND provider = ?
-                AND connection_token = ?
+                AND provider = 'akamai'
+                AND enrollment_token = ?
                 AND terminated_at_ms IS NULL
             "#,
         )
-        .bind(now.as_millis())
-        .bind(now.as_millis())
         .bind(id.to_string())
-        .bind(expected_provider.as_str())
-        .bind(presented_token)
-        .execute(&self.pool)
+        .bind(enrollment_token)
+        .fetch_optional(&self.pool)
         .await?;
-        if accepted.rows_affected() == 1 {
-            return Ok(AgentAuthentication::Accepted);
-        }
+        row.map(|row| {
+            Ok(AgentEnrollment {
+                connection_token: row.try_get("connection_token")?,
+                certificate_signing_request_pem: row.try_get("agent_csr_pem")?,
+                certificate_chain_pem: row.try_get("agent_certificate_chain_pem")?,
+                certificate_der: row.try_get("agent_certificate_der")?,
+                certificate_expires_at: optional_timestamp(
+                    row.try_get("agent_certificate_expires_at_ms")?,
+                )?,
+            })
+        })
+        .transpose()
+    }
 
-        if expected_provider != ComputeProvider::Akamai {
-            return Ok(AgentAuthentication::Rejected);
-        }
-
-        let enrollment = sqlx::query(
+    pub async fn record_agent_certificate(
+        &self,
+        id: ComputeInstanceId,
+        enrollment_token: &str,
+        certificate: &AgentCertificateRecord,
+    ) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(
             r#"
             UPDATE compute_instances
             SET
-                agent_connected_at_ms = max(
-                    coalesce(agent_connected_at_ms, 0),
-                    ?,
-                    updated_at_ms,
-                    created_at_ms
-                ),
+                agent_csr_pem = ?,
+                agent_certificate_chain_pem = ?,
+                agent_certificate_der = ?,
+                agent_certificate_expires_at_ms = ?,
                 failure_message = NULL,
                 updated_at_ms = max(?, updated_at_ms, created_at_ms)
             WHERE
                 id = ?
                 AND provider = 'akamai'
                 AND enrollment_token = ?
+                AND agent_csr_pem IS NULL
                 AND terminated_at_ms IS NULL
-            RETURNING connection_token
             "#,
         )
-        .bind(now.as_millis())
-        .bind(now.as_millis())
+        .bind(&certificate.certificate_signing_request_pem)
+        .bind(&certificate.certificate_chain_pem)
+        .bind(&certificate.certificate_der)
+        .bind(certificate.certificate_expires_at.as_millis())
+        .bind(certificate.recorded_at.as_millis())
         .bind(id.to_string())
-        .bind(presented_token)
-        .fetch_optional(&self.pool)
+        .bind(enrollment_token)
+        .execute(&self.pool)
         .await?;
-        match enrollment {
-            Some(row) => Ok(AgentAuthentication::ReplaceToken(
-                row.try_get("connection_token")?,
-            )),
-            None => Ok(AgentAuthentication::Rejected),
-        }
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn authenticate_agent(
+        &self,
+        id: ComputeInstanceId,
+        expected_provider: ComputeProvider,
+        presented_token: &str,
+        presented_certificate_der: Option<&[u8]>,
+        now: UnixTimestampMillis,
+    ) -> Result<AgentAuthentication, RepositoryError> {
+        let accepted = match expected_provider {
+            ComputeProvider::LocalProcess => {
+                sqlx::query(
+                    r#"
+                    UPDATE compute_instances
+                    SET
+                        agent_connected_at_ms = max(
+                            coalesce(agent_connected_at_ms, 0),
+                            ?,
+                            updated_at_ms,
+                            created_at_ms
+                        ),
+                        failure_message = NULL,
+                        updated_at_ms = max(?, updated_at_ms, created_at_ms)
+                    WHERE
+                        id = ?
+                        AND provider = 'local_process'
+                        AND connection_token = ?
+                        AND terminated_at_ms IS NULL
+                    "#,
+                )
+                .bind(now.as_millis())
+                .bind(now.as_millis())
+                .bind(id.to_string())
+                .bind(presented_token)
+                .execute(&self.pool)
+                .await?
+            }
+            ComputeProvider::Akamai => {
+                let Some(certificate_der) = presented_certificate_der else {
+                    return Ok(AgentAuthentication::Rejected);
+                };
+                sqlx::query(
+                    r#"
+                    UPDATE compute_instances
+                    SET
+                        enrollment_token = NULL,
+                        agent_connected_at_ms = max(
+                            coalesce(agent_connected_at_ms, 0),
+                            ?,
+                            updated_at_ms,
+                            created_at_ms
+                        ),
+                        failure_message = NULL,
+                        updated_at_ms = max(?, updated_at_ms, created_at_ms)
+                    WHERE
+                        id = ?
+                        AND provider = 'akamai'
+                        AND connection_token = ?
+                        AND agent_certificate_der = ?
+                        AND agent_certificate_expires_at_ms > ?
+                        AND terminated_at_ms IS NULL
+                    "#,
+                )
+                .bind(now.as_millis())
+                .bind(now.as_millis())
+                .bind(id.to_string())
+                .bind(presented_token)
+                .bind(certificate_der)
+                .bind(now.as_millis())
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(if accepted.rows_affected() == 1 {
+            AgentAuthentication::Accepted
+        } else {
+            AgentAuthentication::Rejected
+        })
     }
 
     pub async fn request_shutdown(

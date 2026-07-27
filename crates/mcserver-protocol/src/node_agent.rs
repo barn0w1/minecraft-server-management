@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub mod method {
+    pub const AGENT_ENROLL: &str = "agent.enroll";
     pub const AGENT_REGISTER: &str = "agent.register";
     pub const AGENT_INSPECT: &str = "agent.inspect";
     pub const DATA_RESTORE: &str = "data.restore";
@@ -14,6 +15,20 @@ pub mod method {
     pub const DATA_SNAPSHOT: &str = "data.snapshot";
     pub const INSTANCE_CLEANUP: &str = "instance.cleanup";
     pub const NODE_SHUTDOWN: &str = "node.shutdown";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollParams {
+    pub protocol_version: u32,
+    pub compute_instance_id: Uuid,
+    pub enrollment_token: String,
+    pub certificate_signing_request_pem: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollResult {
+    pub client_certificate_chain_pem: String,
+    pub connection_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +41,8 @@ pub struct RegisterParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterResult {
     pub accepted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replacement_connection_token: Option<String>,
+    #[serde(default)]
+    pub runtime_environment: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

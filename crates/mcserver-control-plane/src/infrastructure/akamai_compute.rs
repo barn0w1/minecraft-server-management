@@ -31,7 +31,6 @@ struct InstanceProvisioningRequest<'a> {
     region: &'a str,
     instance_type: &'a str,
     image: &'a str,
-    firewall_id: Option<u64>,
     instance: &'a ServerInstance,
     compute: &'a ComputeInstance,
     allow_create: bool,
@@ -41,6 +40,11 @@ struct InstanceProvisioningRequest<'a> {
 pub struct AkamaiOrphanReapSummary {
     pub instances_adopted: usize,
     pub instances_deleted: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AkamaiPreflightSummary {
+    pub managed_instances: usize,
 }
 
 #[derive(Clone)]
@@ -78,10 +82,90 @@ impl AkamaiComputeManager {
         })
     }
 
+    pub async fn preflight(&self) -> Result<AkamaiPreflightSummary, AkamaiComputeError> {
+        self.client
+            .verify_bootstrap_compatibility(&self.config.image, &self.config.region)
+            .await?;
+        for instance_type in &self.config.allowed_instance_types {
+            self.client.verify_instance_type(instance_type).await?;
+        }
+        self.client
+            .verify_firewall(self.config.firewall_id)
+            .await?;
+        let managed_instances = self
+            .client
+            .list_managed_instances(&self.config.scope)
+            .await?
+            .len();
+        if managed_instances > self.config.max_active_instances {
+            return Err(AkamaiComputeError::ActiveInstanceLimitExceeded {
+                active: managed_instances,
+                maximum: self.config.max_active_instances,
+            });
+        }
+        Ok(AkamaiPreflightSummary { managed_instances })
+    }
+
+    #[must_use]
+    pub fn lifetime_exceeded(
+        &self,
+        compute: &ComputeInstance,
+        now: UnixTimestampMillis,
+    ) -> bool {
+        if compute.provider != ComputeProvider::Akamai {
+            return false;
+        }
+        let maximum_millis = i64::try_from(self.config.max_instance_lifetime.as_millis())
+            .unwrap_or(i64::MAX);
+        now.as_millis().saturating_sub(compute.created_at.as_millis()) >= maximum_millis
+    }
+
+    fn require_live_operations_enabled(&self) -> Result<(), AkamaiComputeError> {
+        if self.config.mutations_enabled() {
+            Ok(())
+        } else {
+            Err(AkamaiComputeError::LiveOperationsDisabled)
+        }
+    }
+
+    fn validate_spec(
+        &self,
+        region: &str,
+        instance_type: &str,
+        image: &str,
+        firewall_id: Option<u64>,
+    ) -> Result<(), AkamaiComputeError> {
+        if region != self.config.region {
+            return Err(AkamaiComputeError::RegionNotAllowed {
+                requested: region.to_owned(),
+                allowed: self.config.region.clone(),
+            });
+        }
+        if image != self.config.image {
+            return Err(AkamaiComputeError::ImageNotAllowed {
+                requested: image.to_owned(),
+                allowed: self.config.image.clone(),
+            });
+        }
+        if !self.config.allows_instance_type(instance_type) {
+            return Err(AkamaiComputeError::InstanceTypeNotAllowed(
+                instance_type.to_owned(),
+            ));
+        }
+        if firewall_id != Some(self.config.firewall_id) {
+            return Err(AkamaiComputeError::FirewallNotAllowed {
+                requested: firewall_id,
+                required: self.config.firewall_id,
+            });
+        }
+        Ok(())
+    }
+
     pub async fn reap_orphans(
         &self,
         active: &[ComputeInstance],
     ) -> Result<AkamaiOrphanReapSummary, AkamaiComputeError> {
+        self.require_live_operations_enabled()?;
         let mut summary = AkamaiOrphanReapSummary::default();
         let managed = self
             .client
@@ -154,11 +238,13 @@ impl AkamaiComputeManager {
             } => (region, instance_type, image, *firewall_id),
             crate::domain::ComputeSpec::Local => return Err(AkamaiComputeError::WrongProvider),
         };
+        self.validate_spec(region, instance_type, image, firewall_id)?;
         let (compute, mut changed) =
             match self.repository.get_active_for_instance(instance.id).await? {
                 Some(compute) if compute.provider == ComputeProvider::Akamai => (compute, false),
                 Some(_) => return Err(AkamaiComputeError::WrongProvider),
                 None => {
+                    self.require_live_operations_enabled()?;
                     let connection_token = super::compute::new_connection_token();
                     let enrollment_token = super::compute::new_connection_token();
                     let compute = self
@@ -183,7 +269,11 @@ impl AkamaiComputeManager {
                     .parse::<u64>()
                     .map_err(AkamaiComputeError::InvalidProviderId)?;
                 match self.client.get_instance(provider_id).await? {
-                    Some(provider) if provider.is_owned_by(&label, &self.scope_tag()) => provider,
+                    Some(provider) if provider.is_owned_by(&label, &self.scope_tag()) => {
+                        self.verify_provider_configuration(&provider, region, instance_type, image)
+                            .await?;
+                        provider
+                    }
                     Some(provider) => {
                         return Err(AkamaiComputeError::ProviderOwnershipMismatch {
                             provider_instance_id: provider.id,
@@ -201,7 +291,6 @@ impl AkamaiComputeManager {
                             region,
                             instance_type,
                             image,
-                            firewall_id,
                             instance,
                             compute: &compute,
                             allow_create: instance.data_prepared_at.is_none(),
@@ -216,7 +305,6 @@ impl AkamaiComputeManager {
                     region,
                     instance_type,
                     image,
-                    firewall_id,
                     instance,
                     compute: &compute,
                     allow_create: instance.data_prepared_at.is_none(),
@@ -262,7 +350,6 @@ impl AkamaiComputeManager {
             region,
             instance_type,
             image,
-            firewall_id,
             instance,
             compute,
             allow_create,
@@ -274,20 +361,35 @@ impl AkamaiComputeManager {
                     expected_label: label.to_owned(),
                 });
             }
+            self.verify_provider_configuration(&existing, region, instance_type, image)
+                .await?;
             return Ok(existing);
         }
         if !allow_create {
             return Err(AkamaiComputeError::ProviderInstanceLost(instance.id));
         }
+        self.require_live_operations_enabled()?;
 
         self.client
             .verify_bootstrap_compatibility(image, region)
             .await?;
+        self.client.verify_instance_type(instance_type).await?;
+        self.client.verify_firewall(self.config.firewall_id).await?;
+        let active = self
+            .client
+            .list_managed_instances(&self.config.scope)
+            .await?
+            .len();
+        if active >= self.config.max_active_instances {
+            return Err(AkamaiComputeError::ActiveInstanceLimitReached {
+                active,
+                maximum: self.config.max_active_instances,
+            });
+        }
 
         let bootstrap = build_bootstrap(
             &self.remote,
             &self.config.authorized_keys_file,
-            &self.config.node_agent_environment_file,
             &self.config.scope,
             instance,
             compute,
@@ -301,12 +403,28 @@ impl AkamaiComputeManager {
             booted: true,
             authorized_keys: bootstrap.authorized_keys,
             tags: vec![MANAGED_TAG.to_owned(), self.scope_tag()],
-            firewall_id,
+            firewall_id: Some(self.config.firewall_id),
             metadata: MetadataRequest {
                 user_data: bootstrap.user_data_base64,
             },
         };
-        self.client.create_instance(&request).await
+        let provider = self.client.create_instance(&request).await?;
+        self.verify_provider_configuration(&provider, region, instance_type, image)
+            .await?;
+        Ok(provider)
+    }
+
+    async fn verify_provider_configuration(
+        &self,
+        provider: &ProviderInstance,
+        region: &str,
+        instance_type: &str,
+        image: &str,
+    ) -> Result<(), AkamaiComputeError> {
+        provider.verify_configuration(region, instance_type, image)?;
+        self.client
+            .verify_instance_firewall(provider.id, self.config.firewall_id)
+            .await
     }
 
     fn scope_tag(&self) -> String {
@@ -553,6 +671,76 @@ impl AkamaiClient {
         Ok(())
     }
 
+    async fn verify_instance_type(&self, type_id: &str) -> Result<(), AkamaiComputeError> {
+        let response = self
+            .http
+            .get(format!("{}/linode/types/{type_id}", self.base_url))
+            .send()
+            .await?;
+        let instance_type: ProviderType = checked_response(response).await?.json().await?;
+        if instance_type.id != type_id {
+            return Err(AkamaiComputeError::InstanceTypeIdentityMismatch {
+                expected: type_id.to_owned(),
+                observed: instance_type.id,
+            });
+        }
+        Ok(())
+    }
+
+    async fn verify_firewall(&self, firewall_id: u64) -> Result<(), AkamaiComputeError> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/networking/firewalls/{firewall_id}",
+                self.base_url
+            ))
+            .send()
+            .await?;
+        let firewall: ProviderFirewall = checked_response(response).await?.json().await?;
+        if firewall.id != firewall_id {
+            return Err(AkamaiComputeError::FirewallIdentityMismatch {
+                expected: firewall_id,
+                observed: firewall.id,
+            });
+        }
+        if firewall.status != "enabled" {
+            return Err(AkamaiComputeError::FirewallDisabled {
+                firewall_id,
+                status: firewall.status,
+            });
+        }
+        Ok(())
+    }
+
+    async fn verify_instance_firewall(
+        &self,
+        provider_instance_id: u64,
+        firewall_id: u64,
+    ) -> Result<(), AkamaiComputeError> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/linode/instances/{provider_instance_id}/firewalls?page=1&page_size=500",
+                self.base_url
+            ))
+            .send()
+            .await?;
+        let firewalls: ListFirewallsResponse = checked_response(response).await?.json().await?;
+        let Some(firewall) = firewalls.data.into_iter().find(|value| value.id == firewall_id) else {
+            return Err(AkamaiComputeError::RequiredFirewallMissing {
+                provider_instance_id,
+                firewall_id,
+            });
+        };
+        if firewall.status != "enabled" {
+            return Err(AkamaiComputeError::FirewallDisabled {
+                firewall_id,
+                status: firewall.status,
+            });
+        }
+        Ok(())
+    }
+
     async fn get_image(&self, image_id: &str) -> Result<ProviderImage, AkamaiComputeError> {
         let response = self
             .http
@@ -681,6 +869,10 @@ struct MetadataRequest {
 struct ProviderInstance {
     id: u64,
     label: String,
+    region: String,
+    #[serde(rename = "type")]
+    instance_type: String,
+    image: String,
     #[serde(default)]
     ipv4: Vec<String>,
     #[serde(default)]
@@ -704,6 +896,22 @@ struct ProviderRegion {
     capabilities: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProviderType {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderFirewall {
+    id: u64,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListFirewallsResponse {
+    data: Vec<ProviderFirewall>,
+}
+
 impl ProviderInstance {
     fn label(&self) -> &str {
         &self.label
@@ -713,6 +921,26 @@ impl ProviderInstance {
         self.label == expected_label
             && self.tags.iter().any(|tag| tag == MANAGED_TAG)
             && self.tags.iter().any(|tag| tag == scope_tag)
+    }
+
+    fn verify_configuration(
+        &self,
+        region: &str,
+        instance_type: &str,
+        image: &str,
+    ) -> Result<(), AkamaiComputeError> {
+        if self.region != region || self.instance_type != instance_type || self.image != image {
+            return Err(AkamaiComputeError::ProviderConfigurationMismatch {
+                provider_instance_id: self.id,
+                expected_region: region.to_owned(),
+                observed_region: self.region.clone(),
+                expected_type: instance_type.to_owned(),
+                observed_type: self.instance_type.clone(),
+                expected_image: image.to_owned(),
+                observed_image: self.image.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn public_ipv4(&self) -> Option<String> {
@@ -762,6 +990,20 @@ impl AkamaiComputeError {
 pub enum AkamaiComputeError {
     #[error("Akamai provider used for a non-Akamai compute specification")]
     WrongProvider,
+    #[error("billable Akamai creation and startup orphan reaping are disabled; set MCSERVER_AKAMAI_LIVE_ENABLED=true after preflight")]
+    LiveOperationsDisabled,
+    #[error("Akamai region {requested} is not allowed; configured region is {allowed}")]
+    RegionNotAllowed { requested: String, allowed: String },
+    #[error("Akamai image {requested} is not allowed; configured image is {allowed}")]
+    ImageNotAllowed { requested: String, allowed: String },
+    #[error("Akamai instance type is not allowed: {0}")]
+    InstanceTypeNotAllowed(String),
+    #[error("Akamai firewall {requested:?} is not allowed; required firewall is {required}")]
+    FirewallNotAllowed { requested: Option<u64>, required: u64 },
+    #[error("Akamai managed instance limit is already reached: active={active}, maximum={maximum}")]
+    ActiveInstanceLimitReached { active: usize, maximum: usize },
+    #[error("Akamai managed instance count exceeds the configured limit: active={active}, maximum={maximum}")]
+    ActiveInstanceLimitExceeded { active: usize, maximum: usize },
     #[error("active compute instance was created concurrently")]
     CreateConflict,
     #[error("compute instance disappeared after provider update")]
@@ -778,6 +1020,29 @@ pub enum AkamaiComputeError {
     ProviderOwnershipMismatch {
         provider_instance_id: u64,
         expected_label: String,
+    },
+    #[error(
+        "Akamai instance {provider_instance_id} configuration differs from the resolved specification: region {observed_region} (expected {expected_region}), type {observed_type} (expected {expected_type}), image {observed_image} (expected {expected_image})"
+    )]
+    ProviderConfigurationMismatch {
+        provider_instance_id: u64,
+        expected_region: String,
+        observed_region: String,
+        expected_type: String,
+        observed_type: String,
+        expected_image: String,
+        observed_image: String,
+    },
+    #[error("Akamai instance type response identity mismatch: expected {expected}, observed {observed}")]
+    InstanceTypeIdentityMismatch { expected: String, observed: String },
+    #[error("Akamai firewall response identity mismatch: expected {expected}, observed {observed}")]
+    FirewallIdentityMismatch { expected: u64, observed: u64 },
+    #[error("Akamai firewall {firewall_id} is not enabled; status={status}")]
+    FirewallDisabled { firewall_id: u64, status: String },
+    #[error("Akamai instance {provider_instance_id} is not attached to required firewall {firewall_id}")]
+    RequiredFirewallMissing {
+        provider_instance_id: u64,
+        firewall_id: u64,
     },
     #[error("Akamai image response identity mismatch: expected {expected}, observed {observed}")]
     ImageIdentityMismatch { expected: String, observed: String },
@@ -860,6 +1125,9 @@ mod tests {
         let instance = ProviderInstance {
             id: 1,
             label: "test".to_owned(),
+            region: "jp-tyo-3".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
             ipv4: vec!["192.168.1.1".to_owned(), "203.0.113.10".to_owned()],
             tags: Vec::new(),
         };
@@ -878,6 +1146,9 @@ mod tests {
         let instance = ProviderInstance {
             id: 1,
             label: "mcserver-owned".to_owned(),
+            region: "jp-tyo-3".to_owned(),
+            instance_type: "g6-nanode-1".to_owned(),
+            image: "linode/debian13".to_owned(),
             ipv4: Vec::new(),
             tags: vec![
                 "mcserver-managed".to_owned(),

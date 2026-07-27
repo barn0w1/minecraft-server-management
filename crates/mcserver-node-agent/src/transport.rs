@@ -1,11 +1,19 @@
-use std::{io, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Output,
+    sync::Arc,
+    time::Duration,
+};
 
 use mcserver_protocol::{
     json_rpc::{self, ErrorObject, Request, Response},
     node_agent::{
-        self, AgentInspectParams, CleanupInstanceParams, RegisterParams, RegisterResult,
-        RestoreDataParams, ShutdownResult, SnapshotDataParams, StartServerParams, StopServerParams,
-        method,
+        self, AgentInspectParams, CleanupInstanceParams, EnrollParams, EnrollResult, RegisterParams,
+        RegisterResult, RestoreDataParams, ShutdownResult, SnapshotDataParams, StartServerParams,
+        StopServerParams, method,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -14,6 +22,8 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
+    process::Command,
+    sync::RwLock,
 };
 use tokio_rustls::{TlsConnector, rustls};
 use tracing::{info, warn};
@@ -25,48 +35,69 @@ use crate::{
 };
 
 const CONNECTION_TOKEN_FILE_NAME: &str = "connection-token";
+const CLIENT_PRIVATE_KEY_FILE_NAME: &str = "client-private-key.pem";
+const CLIENT_CSR_FILE_NAME: &str = "client-request.pem";
+const CLIENT_CERTIFICATE_FILE_NAME: &str = "client-certificate-chain.pem";
 const MAX_CONNECTION_TOKEN_CHARS: usize = 256;
+const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
+const MAX_RUNTIME_ENVIRONMENT_VALUE_CHARS: usize = 16 * 1024;
+const REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS: [&str; 5] = [
+    "RESTIC_PASSWORD",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_REGION",
+];
+const OPENSSL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 
 pub async fn run(
     config: Config,
     executor: AgentExecutor,
+    runtime_environment: Arc<RwLock<BTreeMap<String, String>>>,
     cancellation: CancellationToken,
 ) -> Result<(), TransportError> {
-    let mut connection_token = load_connection_token(&config).await?;
+    let stable_credentials = config.tls.is_some()
+        && stable_client_credentials_exist(&config).await?;
+    let mut connection_token = if stable_credentials {
+        load_persisted_connection_token(&config).await?
+    } else {
+        validate_connection_token(&config.connection_token)?;
+        config.connection_token.clone()
+    };
+    if config.tls.is_some() && !stable_credentials {
+        let result = enroll(&config, &connection_token, cancellation.child_token()).await?;
+        validate_connection_token(&result.connection_token)?;
+        persist_client_certificate(&config, &result.client_certificate_chain_pem).await?;
+        persist_connection_token(&config, &result.connection_token).await?;
+        connection_token = result.connection_token;
+        info!(
+            compute_instance_id = %config.compute_instance_id,
+            "persisted mTLS client certificate and reconnect credential"
+        );
+    }
+
     let mut backoff = config.reconnect_min;
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
         }
-
         match run_session(
             &config,
             &connection_token,
             &executor,
+            Arc::clone(&runtime_environment),
             cancellation.child_token(),
         )
         .await
         {
             Ok(SessionOutcome::Shutdown) => return Ok(()),
-            Ok(SessionOutcome::CredentialRotated(token)) => {
-                persist_connection_token(&config, &token).await?;
-                connection_token = token;
-                backoff = config.reconnect_min;
-                info!(
-                    compute_instance_id = %config.compute_instance_id,
-                    "persisted remote reconnect credential; reconnecting"
-                );
-                continue;
-            }
             Ok(SessionOutcome::Disconnected) => {
                 backoff = config.reconnect_min;
                 warn!("control-plane connection closed; reconnecting");
             }
-            Err(error) => {
-                warn!(%error, "control-plane session failed; reconnecting");
-            }
+            Err(error) => warn!(%error, "control-plane session failed; reconnecting"),
         }
-
         tokio::select! {
             () = cancellation.cancelled() => return Ok(()),
             () = tokio::time::sleep(backoff) => {}
@@ -78,15 +109,54 @@ pub async fn run(
     }
 }
 
+async fn enroll(
+    config: &Config,
+    enrollment_token: &str,
+    cancellation: CancellationToken,
+) -> Result<EnrollResult, TransportError> {
+    validate_connection_token(enrollment_token)?;
+    let csr = load_or_create_csr(config).await?;
+    let stream = tokio::select! {
+        () = cancellation.cancelled() => return Err(TransportError::Disconnected),
+        connected = connect(config, false) => connected?,
+    };
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader);
+    let request_id = json!(1);
+    write_value(
+        &mut writer,
+        &json!({
+            "jsonrpc": json_rpc::VERSION,
+            "method": method::AGENT_ENROLL,
+            "params": EnrollParams {
+                protocol_version: node_agent::PROTOCOL_VERSION,
+                compute_instance_id: config.compute_instance_id,
+                enrollment_token: enrollment_token.to_owned(),
+                certificate_signing_request_pem: csr,
+            },
+            "id": request_id,
+        }),
+    )
+    .await?;
+    let response = read_response(&mut reader, config.max_frame_bytes).await?;
+    if response.id != request_id {
+        return Err(TransportError::Protocol(
+            "enrollment response id mismatch".to_owned(),
+        ));
+    }
+    response_result(response)
+}
+
 async fn run_session(
     config: &Config,
     connection_token: &str,
     executor: &AgentExecutor,
+    runtime_environment: Arc<RwLock<BTreeMap<String, String>>>,
     cancellation: CancellationToken,
 ) -> Result<SessionOutcome, TransportError> {
     let stream = tokio::select! {
         () = cancellation.cancelled() => return Ok(SessionOutcome::Disconnected),
-        connected = connect(config) => connected?,
+        connected = connect(config, config.tls.is_some()) => connected?,
     };
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
@@ -116,11 +186,13 @@ async fn run_session(
     if !result.accepted {
         return Err(TransportError::RegistrationRejected);
     }
-    if let Some(token) = result.replacement_connection_token {
-        validate_connection_token(&token)?;
-        return Ok(SessionOutcome::CredentialRotated(token));
-    }
-    info!(compute_instance_id = %config.compute_instance_id, "registered with control plane");
+    validate_runtime_environment(&result.runtime_environment, config.tls.is_some())?;
+    *runtime_environment.write().await = result.runtime_environment;
+    info!(
+        compute_instance_id = %config.compute_instance_id,
+        mtls = config.tls.is_some(),
+        "registered with control plane"
+    );
 
     loop {
         let request = tokio::select! {
@@ -142,45 +214,58 @@ async fn run_session(
     }
 }
 
-async fn load_connection_token(config: &Config) -> Result<String, TransportError> {
+async fn load_persisted_connection_token(config: &Config) -> Result<String, TransportError> {
     let path = connection_token_path(config);
-    match tokio::fs::read_to_string(&path).await {
-        Ok(token) => {
-            let token = token.trim_end_matches(['\r', '\n']).to_owned();
-            validate_connection_token(&token)?;
-            Ok(token)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            validate_connection_token(&config.connection_token)?;
-            Ok(config.connection_token.clone())
-        }
-        Err(error) => Err(TransportError::CredentialIo {
-            path,
-            source: error,
-        }),
-    }
+    let token = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: path.clone(),
+            source,
+        })?
+        .trim_end_matches(['\r', '\n'])
+        .to_owned();
+    validate_connection_token(&token)?;
+    Ok(token)
 }
 
 async fn persist_connection_token(config: &Config, token: &str) -> Result<(), TransportError> {
     validate_connection_token(token)?;
-    tokio::fs::create_dir_all(&config.state_directory)
-        .await
-        .map_err(|source| TransportError::CredentialIo {
-            path: config.state_directory.clone(),
-            source,
-        })?;
-    tokio::fs::set_permissions(
+    persist_private_file(
         &config.state_directory,
-        std::fs::Permissions::from_mode(0o700),
+        &connection_token_path(config),
+        "connection-token.tmp",
+        token.as_bytes(),
     )
     .await
-    .map_err(|source| TransportError::CredentialIo {
-        path: config.state_directory.clone(),
-        source,
-    })?;
-    let path = connection_token_path(config);
-    let temporary = config.state_directory.join("connection-token.tmp");
-    tokio::fs::write(&temporary, token)
+}
+
+async fn persist_client_certificate(config: &Config, certificate: &str) -> Result<(), TransportError> {
+    if certificate.contains('\0')
+        || !certificate.contains("-----BEGIN CERTIFICATE-----")
+        || certificate.len() > 64 * 1024
+    {
+        return Err(TransportError::TlsConfiguration(
+            "issued client certificate chain is invalid".to_owned(),
+        ));
+    }
+    persist_private_file(
+        &config.state_directory,
+        &client_certificate_path(config),
+        "client-certificate-chain.tmp",
+        certificate.as_bytes(),
+    )
+    .await
+}
+
+async fn persist_private_file(
+    directory: &Path,
+    destination: &Path,
+    temporary_name: &str,
+    value: &[u8],
+) -> Result<(), TransportError> {
+    ensure_private_directory(directory).await?;
+    let temporary = directory.join(temporary_name);
+    tokio::fs::write(&temporary, value)
         .await
         .map_err(|source| TransportError::CredentialIo {
             path: temporary.clone(),
@@ -192,51 +277,244 @@ async fn persist_connection_token(config: &Config, token: &str) -> Result<(), Tr
             path: temporary.clone(),
             source,
         })?;
-    let file =
-        tokio::fs::File::open(&temporary)
-            .await
-            .map_err(|source| TransportError::CredentialIo {
-                path: temporary.clone(),
-                source,
-            })?;
+    let file = tokio::fs::File::open(&temporary)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.clone(),
+            source,
+        })?;
     file.sync_all()
         .await
         .map_err(|source| TransportError::CredentialIo {
             path: temporary.clone(),
             source,
         })?;
-    tokio::fs::rename(&temporary, &path)
+    tokio::fs::rename(&temporary, destination)
         .await
         .map_err(|source| TransportError::CredentialIo {
-            path: path.clone(),
+            path: destination.to_path_buf(),
             source,
         })?;
-    let directory = tokio::fs::File::open(&config.state_directory)
+    let directory_file = tokio::fs::File::open(directory)
         .await
         .map_err(|source| TransportError::CredentialIo {
-            path: config.state_directory.clone(),
+            path: directory.to_path_buf(),
             source,
         })?;
-    directory
+    directory_file
         .sync_all()
         .await
         .map_err(|source| TransportError::CredentialIo {
-            path: config.state_directory.clone(),
+            path: directory.to_path_buf(),
             source,
         })?;
     Ok(())
+}
+
+async fn finalize_private_file(
+    directory: &Path,
+    temporary: &Path,
+    destination: &Path,
+) -> Result<(), TransportError> {
+    tokio::fs::set_permissions(temporary, std::fs::Permissions::from_mode(0o600))
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.to_path_buf(),
+            source,
+        })?;
+    let file = tokio::fs::File::open(temporary)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.to_path_buf(),
+            source,
+        })?;
+    file.sync_all()
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: temporary.to_path_buf(),
+            source,
+        })?;
+    tokio::fs::rename(temporary, destination)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    let directory_file = tokio::fs::File::open(directory)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+    directory_file
+        .sync_all()
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+async fn ensure_private_directory(path: &Path) -> Result<(), TransportError> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|source| TransportError::CredentialIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+async fn stable_client_credentials_exist(config: &Config) -> Result<bool, TransportError> {
+    Ok(path_is_file(&connection_token_path(config)).await?
+        && path_is_file(&client_private_key_path(config)).await?
+        && path_is_file(&client_certificate_path(config)).await?)
+}
+
+async fn path_is_file(path: &Path) -> Result<bool, TransportError> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(TransportError::CredentialIo {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+async fn load_or_create_csr(config: &Config) -> Result<String, TransportError> {
+    ensure_private_directory(&config.state_directory).await?;
+    let key_path = client_private_key_path(config);
+    if !path_is_file(&key_path).await? {
+        let temporary = config.state_directory.join("client-private-key.tmp");
+        run_openssl(
+            Command::new(&config.openssl_binary)
+                .arg("genpkey")
+                .arg("-algorithm")
+                .arg("EC")
+                .arg("-pkeyopt")
+                .arg("ec_paramgen_curve:P-256")
+                .arg("-out")
+                .arg(&temporary),
+            "generate agent client private key",
+        )
+        .await?;
+        finalize_private_file(&config.state_directory, &temporary, &key_path).await?;
+    }
+    let csr_path = client_csr_path(config);
+    if !path_is_file(&csr_path).await? {
+        let temporary = config.state_directory.join("client-request.tmp");
+        run_openssl(
+            Command::new(&config.openssl_binary)
+                .arg("req")
+                .arg("-new")
+                .arg("-key")
+                .arg(&key_path)
+                .arg("-subj")
+                .arg(format!("/CN={}", config.compute_instance_id))
+                .arg("-out")
+                .arg(&temporary),
+            "generate agent certificate signing request",
+        )
+        .await?;
+        finalize_private_file(&config.state_directory, &temporary, &csr_path).await?;
+    }
+    let csr = tokio::fs::read_to_string(&csr_path).await?;
+    if csr.len() > 32 * 1024
+        || !csr.contains("-----BEGIN CERTIFICATE REQUEST-----")
+        || !csr.contains("-----END CERTIFICATE REQUEST-----")
+    {
+        return Err(TransportError::InvalidCertificateSigningRequest);
+    }
+    Ok(csr)
+}
+
+async fn run_openssl(
+    command: &mut Command,
+    description: &'static str,
+) -> Result<Output, TransportError> {
+    let output = tokio::time::timeout(OPENSSL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| TransportError::OpenSslTimeout(description))??;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(TransportError::OpenSslFailed {
+            description,
+            status: output.status.code(),
+            stderr: bounded_diagnostic(&output.stderr),
+        })
+    }
+}
+
+fn bounded_diagnostic(input: &[u8]) -> String {
+    let truncated = input.len() > MAX_DIAGNOSTIC_BYTES;
+    let input = &input[..input.len().min(MAX_DIAGNOSTIC_BYTES)];
+    let mut value = String::from_utf8_lossy(input).trim().to_owned();
+    if truncated {
+        value.push_str(" …[truncated]");
+    }
+    value
 }
 
 fn connection_token_path(config: &Config) -> PathBuf {
     config.state_directory.join(CONNECTION_TOKEN_FILE_NAME)
 }
 
+fn client_private_key_path(config: &Config) -> PathBuf {
+    config.state_directory.join(CLIENT_PRIVATE_KEY_FILE_NAME)
+}
+
+fn client_csr_path(config: &Config) -> PathBuf {
+    config.state_directory.join(CLIENT_CSR_FILE_NAME)
+}
+
+fn client_certificate_path(config: &Config) -> PathBuf {
+    config.state_directory.join(CLIENT_CERTIFICATE_FILE_NAME)
+}
+
 fn validate_connection_token(token: &str) -> Result<(), TransportError> {
-    if token.trim().is_empty()
-        || token.contains('\0')
-        || token.chars().count() > MAX_CONNECTION_TOKEN_CHARS
-    {
+    if token.trim().is_empty() || token.contains('\0') || token.chars().count() > MAX_CONNECTION_TOKEN_CHARS {
         return Err(TransportError::InvalidConnectionToken);
+    }
+    Ok(())
+}
+
+fn validate_runtime_environment(
+    values: &BTreeMap<String, String>,
+    require_remote_storage_credentials: bool,
+) -> Result<(), TransportError> {
+    if values.len() > MAX_RUNTIME_ENVIRONMENT_ENTRIES {
+        return Err(TransportError::InvalidRuntimeEnvironment);
+    }
+    for (key, value) in values {
+        if !(key.starts_with("RESTIC_") || key.starts_with("AWS_"))
+            || !key.bytes().all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+            || matches!(
+                key.as_str(),
+                "RESTIC_REPOSITORY" | "RESTIC_PASSWORD_FILE" | "RESTIC_PASSWORD_COMMAND"
+            )
+            || value.contains('\0')
+            || value.chars().count() > MAX_RUNTIME_ENVIRONMENT_VALUE_CHARS
+        {
+            return Err(TransportError::InvalidRuntimeEnvironment);
+        }
+    }
+    if require_remote_storage_credentials
+        && REQUIRED_REMOTE_RUNTIME_ENVIRONMENT_KEYS.iter().any(|key| {
+            values
+                .get(*key)
+                .is_none_or(|value| value.trim().is_empty())
+        })
+    {
+        return Err(TransportError::InvalidRuntimeEnvironment);
     }
     Ok(())
 }
@@ -246,13 +524,12 @@ type BoxedTransport = Box<dyn TransportStream>;
 trait TransportStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> TransportStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
-async fn connect(config: &Config) -> Result<BoxedTransport, TransportError> {
+async fn connect(config: &Config, use_client_identity: bool) -> Result<BoxedTransport, TransportError> {
     let stream = TcpStream::connect(config.control_plane_address.as_str()).await?;
     stream.set_nodelay(true)?;
     let Some(tls) = config.tls.as_ref() else {
         return Ok(Box::new(stream));
     };
-
     let ca_pem = tokio::fs::read(&tls.ca_certificate).await?;
     let mut reader = std::io::BufReader::new(ca_pem.as_slice());
     let certificates = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
@@ -263,20 +540,37 @@ async fn connect(config: &Config) -> Result<BoxedTransport, TransportError> {
     }
     let mut roots = rustls::RootCertStore::empty();
     for certificate in certificates {
-        roots
-            .add(certificate)
-            .map_err(|error| TransportError::TlsConfiguration(error.to_string()))?;
+        roots.add(certificate).map_err(|error| TransportError::TlsConfiguration(error.to_string()))?;
     }
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+    let client_config = if use_client_identity {
+        let certificate_pem = tokio::fs::read(client_certificate_path(config)).await?;
+        let mut certificate_reader = std::io::BufReader::new(certificate_pem.as_slice());
+        let certificates = rustls_pemfile::certs(&mut certificate_reader).collect::<Result<Vec<_>, _>>()?;
+        if certificates.is_empty() {
+            return Err(TransportError::TlsConfiguration(
+                "client certificate file contains no certificates".to_owned(),
+            ));
+        }
+        let private_key_pem = tokio::fs::read(client_private_key_path(config)).await?;
+        let mut private_key_reader = std::io::BufReader::new(private_key_pem.as_slice());
+        let private_key = rustls_pemfile::private_key(&mut private_key_reader)?.ok_or_else(|| {
+            TransportError::TlsConfiguration(
+                "client private key file contains no supported private key".to_owned(),
+            )
+        })?;
+        builder
+            .with_client_auth_cert(certificates, private_key)
+            .map_err(|error| TransportError::TlsConfiguration(error.to_string()))?
+    } else {
+        builder.with_no_client_auth()
+    };
     let server_name = rustls::pki_types::ServerName::try_from(tls.server_name.clone())
         .map_err(|error| TransportError::TlsConfiguration(error.to_string()))?;
     let connector = TlsConnector::from(Arc::new(client_config));
     let stream = connector.connect(server_name, stream).await?;
     Ok(Box::new(stream))
 }
-
 async fn dispatch(
     executor: &AgentExecutor,
     request: Request,
@@ -517,9 +811,8 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionOutcome {
-    CredentialRotated(String),
     Disconnected,
     Shutdown,
 }
@@ -538,6 +831,8 @@ pub enum TransportError {
     },
     #[error("node-agent connection token is invalid")]
     InvalidConnectionToken,
+    #[error("node-agent certificate signing request is invalid")]
+    InvalidCertificateSigningRequest,
     #[error("control plane disconnected")]
     Disconnected,
     #[error("node-agent frame is too large: at least {actual} bytes, maximum {maximum} bytes")]
@@ -550,4 +845,43 @@ pub enum TransportError {
     Remote { code: i64, message: String },
     #[error("TLS configuration is invalid: {0}")]
     TlsConfiguration(String),
+    #[error("runtime environment returned by the control plane is invalid")]
+    InvalidRuntimeEnvironment,
+    #[error("OpenSSL command {0} timed out")]
+    OpenSslTimeout(&'static str),
+    #[error("OpenSSL command {description} failed with status {status:?}: {stderr}")]
+    OpenSslFailed {
+        description: &'static str,
+        status: Option<i32>,
+        stderr: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::validate_runtime_environment;
+
+    #[test]
+    fn remote_registration_requires_complete_storage_credentials() {
+        let values = BTreeMap::from([(
+            "RESTIC_PASSWORD".to_owned(),
+            "test".to_owned(),
+        )]);
+        assert!(validate_runtime_environment(&values, true).is_err());
+        assert!(validate_runtime_environment(&values, false).is_ok());
+    }
+
+    #[test]
+    fn remote_registration_accepts_complete_storage_credentials() {
+        let values = BTreeMap::from([
+            ("RESTIC_PASSWORD".to_owned(), "test".to_owned()),
+            ("AWS_ACCESS_KEY_ID".to_owned(), "id".to_owned()),
+            ("AWS_SECRET_ACCESS_KEY".to_owned(), "secret".to_owned()),
+            ("AWS_SESSION_TOKEN".to_owned(), "session".to_owned()),
+            ("AWS_DEFAULT_REGION".to_owned(), "auto".to_owned()),
+        ]);
+        assert!(validate_runtime_environment(&values, true).is_ok());
+    }
 }

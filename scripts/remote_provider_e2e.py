@@ -24,6 +24,9 @@ from typing import Any
 
 AKAMAI_REGION = "jp-tyo-3"
 AKAMAI_IMAGE = "linode/debian13"
+R2_ACCOUNT_ID = "0123456789abcdef0123456789abcdef"
+R2_BUCKET = "mcserver-remote-e2e"
+R2_PARENT_ACCESS_KEY_ID = "remote-e2e-parent-access-key"
 
 
 def load_local_e2e(repository_root: Path) -> Any:
@@ -62,6 +65,7 @@ class FakeAkamaiState:
         self.lost_delete_response_injected = False
         self.image_preflight_checks = 0
         self.region_preflight_checks = 0
+        self.r2_credential_requests: list[dict[str, Any]] = []
 
     def list_by_label(self, label: str | None) -> list[dict[str, Any]]:
         with self.lock:
@@ -80,6 +84,9 @@ class FakeAkamaiState:
                 "status": "running",
                 "ipv4": ["203.0.113.9"],
                 "tags": ["mcserver-managed", f"mcserver-scope-{scope}"],
+                "region": AKAMAI_REGION,
+                "type": "g6-nanode-1",
+                "image": AKAMAI_IMAGE,
                 "has_user_data": True,
             }
             self.orphan_ids.add(instance_id)
@@ -102,6 +109,9 @@ class FakeAkamaiState:
                 "status": "running",
                 "ipv4": [f"203.0.113.{10 + len(self.instances)}"],
                 "tags": request.get("tags", []),
+                "region": request["region"],
+                "type": request["type"],
+                "image": request["image"],
                 "has_user_data": True,
             }
             self.instances[instance_id] = value
@@ -128,6 +138,16 @@ class FakeAkamaiState:
             if existed:
                 self.deleted.append(instance_id)
             return existed, lose_response
+
+    def issue_r2_credentials(self, request: dict[str, Any]) -> dict[str, str]:
+        with self.lock:
+            self.r2_credential_requests.append(dict(request))
+            generation = len(self.r2_credential_requests)
+        return {
+            "accessKeyId": f"temporary-access-{generation}",
+            "secretAccessKey": f"temporary-secret-{generation}",
+            "sessionToken": f"temporary-session-{generation}",
+        }
 
 
 class FakeAkamaiHandler(BaseHTTPRequestHandler):
@@ -157,6 +177,33 @@ class FakeAkamaiHandler(BaseHTTPRequestHandler):
                     "id": AKAMAI_REGION,
                     "label": "Tokyo 3, JP",
                     "capabilities": ["Linodes", "Metadata"],
+                },
+            )
+            return
+        if self.path == "/v4/linode/types/g6-nanode-1":
+            self.send_json(200, {"id": "g6-nanode-1", "label": "Nanode 1 GB"})
+            return
+        if self.path == "/v4/networking/firewalls/123":
+            self.send_json(200, {"id": 123, "label": "remote-e2e", "status": "enabled"})
+            return
+        firewall_prefix = "/v4/linode/instances/"
+        if self.path.startswith(firewall_prefix) and "/firewalls?" in self.path:
+            instance_part = self.path[len(firewall_prefix) :].split("/", 1)[0]
+            try:
+                instance_id = int(instance_part)
+            except ValueError:
+                self.send_json(404, {"errors": [{"reason": "not found"}]})
+                return
+            if self.server.state.get(instance_id) is None:
+                self.send_json(404, {"errors": [{"reason": "not found"}]})
+                return
+            self.send_json(
+                200,
+                {
+                    "data": [{"id": 123, "label": "remote-e2e", "status": "enabled"}],
+                    "page": 1,
+                    "pages": 1,
+                    "results": 1,
                 },
             )
             return
@@ -190,6 +237,74 @@ class FakeAkamaiHandler(BaseHTTPRequestHandler):
         self.send_json(404, {"errors": [{"reason": "not found"}]})
 
     def do_POST(self) -> None:  # noqa: N802
+        r2_path = f"/client/v4/accounts/{R2_ACCOUNT_ID}/r2/temp-access-credentials"
+        if self.path == r2_path:
+            if self.headers.get("Authorization") != "Bearer remote-e2e-r2-api-token":
+                self.send_json(
+                    403,
+                    {
+                        "result": None,
+                        "errors": [{"code": 10000, "message": "authentication failed"}],
+                        "messages": [],
+                        "success": False,
+                    },
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length))
+            except (ValueError, json.JSONDecodeError):
+                self.send_json(400, {"errors": [{"message": "invalid JSON"}], "success": False})
+                return
+            expected = {
+                "bucket": R2_BUCKET,
+                "parentAccessKeyId": R2_PARENT_ACCESS_KEY_ID,
+                "permission": "object-read-write",
+            }
+            if any(request.get(key) != value for key, value in expected.items()):
+                self.send_json(
+                    400,
+                    {
+                        "result": None,
+                        "errors": [{"code": 10001, "message": "invalid temporary credential scope"}],
+                        "messages": [],
+                        "success": False,
+                    },
+                )
+                return
+            prefixes = request.get("prefixes")
+            ttl = request.get("ttlSeconds")
+            minimum_ttl = 900 if prefixes == ["mcserver-preflight/"] else 3630
+            if (
+                not isinstance(prefixes, list)
+                or len(prefixes) != 1
+                or not isinstance(prefixes[0], str)
+                or not prefixes[0].endswith("/")
+                or not isinstance(ttl, int)
+                or ttl < minimum_ttl
+                or ttl > 604800
+            ):
+                self.send_json(
+                    400,
+                    {
+                        "result": None,
+                        "errors": [{"code": 10002, "message": "invalid TTL or prefix"}],
+                        "messages": [],
+                        "success": False,
+                    },
+                )
+                return
+            credentials = self.server.state.issue_r2_credentials(request)
+            self.send_json(
+                200,
+                {
+                    "result": credentials,
+                    "errors": [],
+                    "messages": [],
+                    "success": True,
+                },
+            )
+            return
         if self.path != "/v4/linode/instances":
             self.send_json(404, {"errors": [{"reason": "not found"}]})
             return
@@ -263,9 +378,11 @@ class FakeAkamaiServer(ThreadingHTTPServer):
         self.state = state
 
 
-def generate_tls(work: Path) -> tuple[Path, Path]:
-    certificate = work / "remote-agent.crt"
-    private_key = work / "remote-agent.key"
+def generate_tls(work: Path) -> tuple[Path, Path, Path, Path]:
+    server_certificate = work / "remote-agent.crt"
+    server_private_key = work / "remote-agent.key"
+    client_ca_certificate = work / "agent-client-ca.crt"
+    client_ca_private_key = work / "agent-client-ca.key"
     subprocess.run(
         [
             "openssl",
@@ -275,13 +392,19 @@ def generate_tls(work: Path) -> tuple[Path, Path]:
             "rsa:2048",
             "-nodes",
             "-keyout",
-            str(private_key),
+            str(server_private_key),
             "-out",
-            str(certificate),
+            str(server_certificate),
             "-days",
             "1",
             "-subj",
             "/CN=localhost",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyEncipherment",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
             "-addext",
             "subjectAltName=DNS:localhost,IP:127.0.0.1",
         ],
@@ -289,7 +412,37 @@ def generate_tls(work: Path) -> tuple[Path, Path]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return certificate, private_key
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(client_ca_private_key),
+            "-out",
+            str(client_ca_certificate),
+            "-days",
+            "2",
+            "-subj",
+            "/CN=mcserver remote E2E agent CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE,pathlen:0",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return (
+        server_certificate,
+        server_private_key,
+        client_ca_certificate,
+        client_ca_private_key,
+    )
 
 
 def wait_for_socket(process: subprocess.Popen[bytes], path: Path, deadline: float, log: Path) -> None:
@@ -306,11 +459,15 @@ def wait_for_socket(process: subprocess.Popen[bytes], path: Path, deadline: floa
     raise TimeoutError(f"timed out waiting for control-plane socket: {path}")
 
 
-def manifest_from_request(request: dict[str, Any]) -> dict[str, Any]:
+def bootstrap_script_from_request(request: dict[str, Any]) -> str:
     metadata = request.get("metadata")
     if not isinstance(metadata, dict) or not isinstance(metadata.get("user_data"), str):
         raise RuntimeError("Akamai create request has no metadata.user_data")
-    script = base64.b64decode(metadata["user_data"], validate=True).decode()
+    return base64.b64decode(metadata["user_data"], validate=True).decode()
+
+
+def manifest_from_request(request: dict[str, Any]) -> dict[str, Any]:
+    script = bootstrap_script_from_request(request)
     prefix = "# mcserver-bootstrap: "
     line = next((line for line in script.splitlines() if line.startswith(prefix)), None)
     if line is None:
@@ -339,6 +496,9 @@ def launch_new_agents(
         if manifest["control_plane_address"] != remote_address:
             raise RuntimeError("bootstrap manifest contains unexpected control-plane address")
         environment = os.environ.copy()
+        for key in list(environment):
+            if key.startswith("RESTIC_") or key.startswith("AWS_"):
+                environment.pop(key)
         environment.update(
             {
                 "MCSERVER_NODE_AGENT_CONTROL_PLANE_ADDRESS": remote_address,
@@ -355,7 +515,6 @@ def launch_new_agents(
                 "MCSERVER_NODE_AGENT_RECONNECT_MIN_SECONDS": "1",
                 "MCSERVER_NODE_AGENT_RECONNECT_MAX_SECONDS": "2",
                 "MCSERVER_FAKE_RUNTIME_DIRECTORY": str(runtime),
-                "RESTIC_PASSWORD": "remote-provider-e2e",
                 "RUST_LOG": "mcserver_node_agent=info",
             }
         )
@@ -417,12 +576,23 @@ def main() -> int:
     database_path = work / "control-plane.db"
     control_log = work / "control-plane.log"
     runtime = work / "fake-runtime"
-    repository = work / "restic-repository"
-    certificate, private_key = generate_tls(work)
+    repository = (
+        f"s3:https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/"
+        f"{R2_BUCKET}/remote-e2e/repository"
+    )
+    (
+        certificate,
+        private_key,
+        client_ca_certificate,
+        client_ca_private_key,
+    ) = generate_tls(work)
     authorized_keys = work / "authorized_keys"
     authorized_keys.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE2Etest remote-e2e\n")
     agent_environment = work / "node-agent.env"
-    agent_environment.write_text("RESTIC_PASSWORD=remote-provider-e2e\n")
+    agent_environment.write_text(
+        "RESTIC_PASSWORD=remote-provider-e2e\n"
+        "AWS_DEFAULT_REGION=auto\n"
+    )
     api_state = FakeAkamaiState()
     orphan_provider_id = api_state.seed_orphan("remote-e2e")
     api_port = free_tcp_port()
@@ -453,17 +623,35 @@ def main() -> int:
             "MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CERTIFICATE": str(certificate),
             "MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_PRIVATE_KEY": str(private_key),
             "MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CA_CERTIFICATE": str(certificate),
+            "MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_CERTIFICATE": str(client_ca_certificate),
+            "MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_PRIVATE_KEY": str(client_ca_private_key),
+            "MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_WORK_DIRECTORY": str(work / "agent-pki"),
+            "MCSERVER_CONTROL_PLANE_AGENT_CERTIFICATE_VALIDITY_SECONDS": "7200",
+            "MCSERVER_CONTROL_PLANE_AGENT_TRUST_DOMAIN": "remote-e2e.invalid",
             "MCSERVER_CONTROL_PLANE_NODE_AGENT_DOWNLOAD_URL": "https://example.invalid/mcserver-node-agent",
             "MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256": "0" * 64,
             "MCSERVER_AKAMAI_API_TOKEN": "remote-e2e-token",
             "MCSERVER_AKAMAI_API_BASE_URL": f"http://127.0.0.1:{api_port}/v4",
             "MCSERVER_AKAMAI_AUTHORIZED_KEYS_FILE": str(authorized_keys),
-            "MCSERVER_AKAMAI_NODE_AGENT_ENVIRONMENT_FILE": str(agent_environment),
             "MCSERVER_AKAMAI_SCOPE": "remote-e2e",
             "MCSERVER_AKAMAI_REQUEST_TIMEOUT_SECONDS": "5",
             "MCSERVER_AKAMAI_REAP_ORPHANS_ON_START": "true",
+            "MCSERVER_AKAMAI_LIVE_ENABLED": "true",
+            "MCSERVER_AKAMAI_REGION": AKAMAI_REGION,
+            "MCSERVER_AKAMAI_IMAGE": AKAMAI_IMAGE,
+            "MCSERVER_AKAMAI_FIREWALL_ID": "123",
+            "MCSERVER_AKAMAI_ALLOWED_INSTANCE_TYPES": "g6-nanode-1",
+            "MCSERVER_AKAMAI_MAX_ACTIVE_INSTANCES": "1",
+            "MCSERVER_AKAMAI_MAX_INSTANCE_LIFETIME_SECONDS": "3600",
+            "MCSERVER_R2_API_TOKEN": "remote-e2e-r2-api-token",
+            "MCSERVER_R2_API_BASE_URL": f"http://127.0.0.1:{api_port}/client/v4",
+            "MCSERVER_R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+            "MCSERVER_R2_PARENT_ACCESS_KEY_ID": R2_PARENT_ACCESS_KEY_ID,
+            "MCSERVER_R2_BUCKET": R2_BUCKET,
+            "MCSERVER_R2_TEMPORARY_CREDENTIAL_TTL_SECONDS": "7200",
+            "MCSERVER_R2_RUNTIME_ENVIRONMENT_FILE": str(agent_environment),
+            "MCSERVER_R2_REQUEST_TIMEOUT_SECONDS": "5",
             "MCSERVER_FAKE_RUNTIME_DIRECTORY": str(runtime),
-            "RESTIC_PASSWORD": "remote-provider-e2e",
             "RUST_LOG": "mcserver_control_plane=info,mcserver_node_agent=info",
         }
     )
@@ -472,9 +660,19 @@ def main() -> int:
     launched: dict[str, subprocess.Popen[bytes]] = {}
     succeeded = False
     try:
+        init_environment = environment.copy()
+        init_environment.update(
+            {
+                "RESTIC_PASSWORD": "remote-provider-e2e",
+                "AWS_ACCESS_KEY_ID": "initialization-access",
+                "AWS_SECRET_ACCESS_KEY": "initialization-secret",
+                "AWS_SESSION_TOKEN": "initialization-session",
+                "AWS_DEFAULT_REGION": "auto",
+            }
+        )
         subprocess.run(
             [str(fake_restic), "--repo", str(repository), "init"],
-            env=environment,
+            env=init_environment,
             check=True,
         )
         with control_log.open("wb") as log:
@@ -512,7 +710,7 @@ def main() -> int:
                             "accept_eula": True,
                             "environment": {},
                         },
-                        "data": {"repository": str(repository)},
+                        "data": {"repository": repository},
                     },
                 },
             )
@@ -608,26 +806,58 @@ def main() -> int:
                         "region capability preflight did not run for both generations: "
                         f"{api_state.region_preflight_checks}"
                     )
+                if len(api_state.r2_credential_requests) < 3:
+                    raise RuntimeError(
+                        "R2 temporary credentials were not issued for preflight and both "
+                        f"remote registrations: {api_state.r2_credential_requests!r}"
+                    )
+                prefixes = [
+                    request["prefixes"][0]
+                    for request in api_state.r2_credential_requests
+                ]
+                if prefixes.count("mcserver-preflight/") != 1:
+                    raise RuntimeError(f"unexpected R2 preflight scopes: {prefixes!r}")
+                if prefixes.count("remote-e2e/repository/") < 2:
+                    raise RuntimeError(f"remote R2 credentials were not prefix-scoped: {prefixes!r}")
                 for request in api_state.requests:
                     if request.get("region") != AKAMAI_REGION:
                         raise RuntimeError("Akamai create request used the wrong region")
                     if request.get("image") != AKAMAI_IMAGE:
                         raise RuntimeError("Akamai create request used the wrong image")
+                    script = bootstrap_script_from_request(request)
+                    if "remote-provider-e2e" in script or "RESTIC_PASSWORD" in script:
+                        raise RuntimeError("runtime storage secrets leaked into cloud-init user data")
                     manifest = manifest_from_request(request)
-                    credential_path = (
-                        work
-                        / "remote-agents"
-                        / str(manifest["compute_instance_id"])
-                        / "connection-token"
+                    state_directory = (
+                        work / "remote-agents" / str(manifest["compute_instance_id"])
                     )
+                    credential_path = state_directory / "connection-token"
+                    certificate_path = state_directory / "client-certificate-chain.pem"
+                    private_key_path = state_directory / "client-private-key.pem"
                     if not credential_path.is_file():
                         raise RuntimeError("remote agent did not persist its reconnect token")
+                    if not certificate_path.is_file() or not private_key_path.is_file():
+                        raise RuntimeError("remote agent did not persist its mTLS identity")
                     reconnect_token = credential_path.read_text().strip()
                     if (
                         reconnect_token == manifest["enrollment_token"]
                         or len(reconnect_token) != 64
                     ):
                         raise RuntimeError("remote agent reconnect token was not rotated")
+                    subprocess.run(
+                        [
+                            "openssl",
+                            "verify",
+                            "-purpose",
+                            "sslclient",
+                            "-CAfile",
+                            str(client_ca_certificate),
+                            str(certificate_path),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                     if request.get("booted") is not True:
                         raise RuntimeError("Akamai create request did not request boot")
                     if request.get("firewall_id") != 123:
@@ -635,17 +865,33 @@ def main() -> int:
                     if "mcserver-managed" not in request.get("tags", []):
                         raise RuntimeError("Akamai create request has no ownership tag")
             with sqlite3.connect(database_path) as database:
-                remaining_enrollment_tokens = database.execute(
-                    "SELECT count(*) FROM compute_instances WHERE enrollment_token IS NOT NULL"
-                ).fetchone()[0]
-            if remaining_enrollment_tokens != 0:
+                enrollment_state = database.execute(
+                    """
+                    SELECT
+                        count(*) FILTER (WHERE enrollment_token IS NOT NULL),
+                        count(*) FILTER (
+                            WHERE agent_csr_pem IS NOT NULL
+                              AND agent_certificate_chain_pem IS NOT NULL
+                              AND agent_certificate_der IS NOT NULL
+                              AND agent_certificate_expires_at_ms > created_at_ms
+                        )
+                    FROM compute_instances
+                    WHERE provider = 'akamai'
+                    """
+                ).fetchone()
+            if enrollment_state[0] != 0:
                 raise RuntimeError("remote enrollment token was not invalidated")
+            if enrollment_state[1] != 2:
+                raise RuntimeError(
+                    f"remote mTLS certificates were not persisted: {enrollment_state!r}"
+                )
 
             succeeded = True
             print(
-                "remote provider E2E passed: TLS enrollment and credential rotation, startup "
-                "orphan reaping, rate-limit handling, uncertain create/delete recovery, two "
-                "generations, snapshot restore, and VM deletion succeeded"
+                "remote provider E2E passed: mTLS certificate enrollment, prefix-scoped R2 "
+                "temporary credentials, startup orphan reaping, rate-limit handling, uncertain "
+                "create/delete recovery, two generations, snapshot restore, and VM deletion "
+                "succeeded"
             )
     except Exception as error:  # noqa: BLE001
         print(f"remote provider E2E failed: {error}", file=sys.stderr)

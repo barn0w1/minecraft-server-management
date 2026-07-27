@@ -1,0 +1,53 @@
+[Unit]
+Description=Minecraft server management control plane
+Documentation=https://github.com/barn0w1/minecraft-server-management
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mcserver
+Group=mcserver
+EnvironmentFile=/etc/mcserver/control-plane.env
+LoadCredential=akamai-api-token:/etc/mcserver/credentials/akamai-api-token
+LoadCredential=r2-api-token:/etc/mcserver/credentials/r2-api-token
+LoadCredential=remote-tls-private-key:/etc/mcserver/credentials/remote-tls-private-key.pem
+LoadCredential=agent-client-ca-private-key:/etc/mcserver/credentials/agent-client-ca-private-key.pem
+LoadCredential=r2-runtime.env:/etc/mcserver/credentials/r2-runtime.env
+Environment=MCSERVER_AKAMAI_API_TOKEN_FILE=%d/akamai-api-token
+Environment=MCSERVER_R2_API_TOKEN_FILE=%d/r2-api-token
+Environment=MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_PRIVATE_KEY=%d/remote-tls-private-key
+Environment=MCSERVER_CONTROL_PLANE_AGENT_CLIENT_CA_PRIVATE_KEY=%d/agent-client-ca-private-key
+Environment=MCSERVER_R2_RUNTIME_ENVIRONMENT_FILE=%d/r2-runtime.env
+ExecStartPre=/usr/local/bin/mcserver-control-plane --preflight
+ExecStart=/usr/local/bin/mcserver-control-plane run
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+StateDirectory=mcserver
+RuntimeDirectory=mcserver
+ConfigurationDirectory=mcserver
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ReadWritePaths=/var/lib/mcserver /run/mcserver
+
+[Install]
+WantedBy=multi-user.target

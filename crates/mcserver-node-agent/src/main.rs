@@ -3,17 +3,40 @@ mod config;
 mod executor;
 mod transport;
 
-use std::{error::Error, os::unix::fs::PermissionsExt};
+use std::{collections::BTreeMap, env, error::Error, os::unix::fs::PermissionsExt, sync::Arc};
 
 use cancellation::CancellationToken;
 use config::Config;
 use executor::AgentExecutor;
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::{signal::unix::{SignalKind, signal}, sync::RwLock};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [] => {}
+        [argument] if argument == "--version" || argument == "-V" => {
+            println!("mcserver-node-agent {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        [argument] if argument == "--help" || argument == "-h" => {
+            println!(
+                "mcserver-node-agent {}\n\nUSAGE:\n    mcserver-node-agent [--version]",
+                env!("CARGO_PKG_VERSION")
+            );
+            return Ok(());
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid command line: {arguments:?}; use --help for usage"),
+            )
+            .into());
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -28,7 +51,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::fs::Permissions::from_mode(0o700),
     )
     .await?;
-    let executor = AgentExecutor::new(config.clone());
+    let runtime_environment = Arc::new(RwLock::new(BTreeMap::new()));
+    let executor = AgentExecutor::new(config.clone(), Arc::clone(&runtime_environment));
     let cancellation = CancellationToken::new();
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -47,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         compute_instance_id = %config.compute_instance_id,
         "mcserver-node-agent started"
     );
-    let result = transport::run(config, executor, cancellation.clone()).await;
+    let result = transport::run(config, executor, runtime_environment, cancellation.clone()).await;
     cancellation.cancel();
     match signal_task.await {
         Ok(Ok(())) => {}

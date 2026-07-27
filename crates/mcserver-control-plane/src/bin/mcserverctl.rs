@@ -15,7 +15,12 @@ const DEFAULT_STOP_TIMEOUT_SECONDS: u64 = 60;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let invocation = Invocation::parse(env::args().skip(1).collect())?;
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if matches!(arguments.as_slice(), [argument] if argument == "--version" || argument == "-V") {
+        println!("mcserverctl {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let invocation = Invocation::parse(arguments)?;
     let client = UnixRpcClient::new(invocation.socket_path);
     let result = execute(&client, invocation.command).await?;
     println!("{}", serde_json::to_string_pretty(&result)?);

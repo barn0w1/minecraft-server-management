@@ -339,6 +339,26 @@ impl ReconcileWorker {
         if changed {
             return Ok(StepOutcome::Changed);
         }
+        if self
+            .compute_manager
+            .lifetime_exceeded(&compute, provisioned_at)
+        {
+            let mut stopped = server.clone();
+            let previous_generation = stopped.generation;
+            stopped.set_desired_state(DesiredState::Stopped, provisioned_at)?;
+            if self
+                .server_repository
+                .update_desired_state(&stopped, previous_generation)
+                .await?
+            {
+                warn!(
+                    server_id = %server.id,
+                    compute_instance_id = %compute.id,
+                    "maximum Akamai instance lifetime reached; requested a safe stop"
+                );
+            }
+            return Ok(StepOutcome::Changed);
+        }
         if !self.agents.is_connected(compute.id).await {
             return Ok(StepOutcome::Awaiting);
         }
@@ -633,6 +653,7 @@ impl ReconcileError {
         match self {
             Self::Compute(error) => error.retry_after(),
             Self::Repository(_)
+            | Self::Domain(_)
             | Self::Timestamp(_)
             | Self::Agent(_)
             | Self::DidNotConverge(_)
@@ -645,6 +666,8 @@ impl ReconcileError {
 pub enum ReconcileError {
     #[error("reconciliation persistence operation failed: {0}")]
     Repository(#[from] RepositoryError),
+    #[error("reconciliation domain transition failed: {0}")]
+    Domain(#[from] crate::domain::ValidationError),
     #[error("reconciliation timestamp operation failed: {0}")]
     Timestamp(#[from] crate::domain::TimestampError),
     #[error("compute operation failed: {0}")]

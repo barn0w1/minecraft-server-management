@@ -1,13 +1,16 @@
-use std::{error::Error, fmt::Display, time::Duration};
+use std::{env, error::Error, fmt::Display, time::Duration};
 
 use mcserver_control_plane::{
-    agent::{AgentRegistry, AgentServer, AgentServerError, TlsAgentServer},
+    agent::{
+        AgentRegistry, AgentServer, AgentServerError, TlsAgentServer, TlsAgentServerOptions,
+    },
     application::{ServerInstanceService, ServerService, ServerStatusService},
     config::Config,
     infrastructure::{
-        AkamaiComputeManager, ComputeError, ComputeInstanceRepository, ComputeManager,
-        LocalComputeManager, ServerInstanceRepository, ServerRepository, SnapshotRepository,
-        connect_database,
+        AgentCertificateAuthority, AgentCertificateError, AkamaiComputeManager, ComputeError,
+        ComputeInstanceRepository, ComputeManager, LocalComputeManager,
+        R2TemporaryCredentialError, R2TemporaryCredentialManager, ServerInstanceRepository,
+        ServerRepository, SnapshotRepository, connect_database,
     },
     interface::{ClientRpcHandler, UnixSocketError, UnixSocketServer},
     reconciliation::{ReconcileFatalError, ReconcileWorker},
@@ -20,6 +23,19 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let command = Command::parse(env::args().skip(1))?;
+    match command {
+        Command::Version => {
+            println!("mcserver-control-plane {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Command::Help => {
+            print_help();
+            return Ok(());
+        }
+        Command::Run | Command::Preflight => {}
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new(
@@ -29,7 +45,101 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let config = Config::from_env()?;
-    run(config).await?;
+    match command {
+        Command::Run => run(config).await?,
+        Command::Preflight => preflight(config).await?,
+        Command::Version | Command::Help => return Ok(()),
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Run,
+    Preflight,
+    Version,
+    Help,
+}
+
+impl Command {
+    fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, CommandError> {
+        let arguments = arguments.collect::<Vec<_>>();
+        match arguments.as_slice() {
+            [] => Ok(Self::Run),
+            [argument] if argument == "run" => Ok(Self::Run),
+            [argument] if argument == "--preflight" || argument == "preflight" => {
+                Ok(Self::Preflight)
+            }
+            [argument] if argument == "--version" || argument == "-V" => Ok(Self::Version),
+            [argument] if argument == "--help" || argument == "-h" => Ok(Self::Help),
+            _ => Err(CommandError(arguments)),
+        }
+    }
+}
+
+fn print_help() {
+    println!(
+        "mcserver-control-plane {}\n\nUSAGE:\n    mcserver-control-plane [run | --preflight | --version]",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+#[derive(Debug, Error)]
+#[error("invalid command line: {0:?}; use --help for usage")]
+struct CommandError(Vec<String>);
+
+async fn preflight(config: Config) -> Result<(), ControlPlaneError> {
+    let pool = connect_database(&config.database_url).await?;
+    let compute_repository = ComputeInstanceRepository::new(pool.clone());
+
+    if let Some(remote) = config.remote_agent.as_ref() {
+        AgentCertificateAuthority::new(remote).preflight().await?;
+    }
+    let r2_credentials = config
+        .r2
+        .clone()
+        .map(R2TemporaryCredentialManager::new)
+        .transpose()?;
+    if let Some(manager) = r2_credentials.as_ref() {
+        manager.preflight().await?;
+    }
+
+    let managed_instances = match (config.akamai.as_ref(), config.remote_agent.as_ref()) {
+        (Some(akamai), Some(remote)) => {
+            let manager = AkamaiComputeManager::new(
+                compute_repository,
+                AgentRegistry::default(),
+                akamai.clone(),
+                remote.clone(),
+                config.agent_command_timeout,
+            )
+            .map_err(ComputeError::from)?;
+            Some(
+                manager
+                    .preflight()
+                    .await
+                    .map_err(ComputeError::from)?
+                    .managed_instances,
+            )
+        }
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err(ControlPlaneError::InvalidConfiguration(
+                "Akamai provider requires remote TLS agent configuration".to_owned(),
+            ));
+        }
+    };
+
+    pool.close().await;
+    match managed_instances {
+        Some(count) => println!(
+            "preflight ok: database, remote agent PKI, R2 temporary credentials, and Akamai provider; managed_instances={count}"
+        ),
+        None if config.remote_agent.is_some() => {
+            println!("preflight ok: database and remote agent PKI")
+        }
+        None => println!("preflight ok: database and local compute configuration"),
+    }
     Ok(())
 }
 
@@ -40,6 +150,22 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
     let compute_repository = ComputeInstanceRepository::new(pool.clone());
     let snapshot_repository = SnapshotRepository::new(pool.clone());
     let agents = AgentRegistry::default();
+    let remote_certificate_authority = config
+        .remote_agent
+        .as_ref()
+        .map(AgentCertificateAuthority::new);
+    if let Some(authority) = remote_certificate_authority.as_ref() {
+        authority.preflight().await?;
+    }
+    let r2_credentials = config
+        .r2
+        .clone()
+        .map(R2TemporaryCredentialManager::new)
+        .transpose()?;
+    if let Some(manager) = r2_credentials.as_ref() {
+        manager.preflight().await?;
+        info!("Cloudflare R2 temporary credential preflight succeeded");
+    }
 
     let local_compute = LocalComputeManager::new(
         compute_repository.clone(),
@@ -84,6 +210,11 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
                 config.agent_command_timeout,
             )
             .map_err(ComputeError::from)?;
+            let preflight = manager.preflight().await.map_err(ComputeError::from)?;
+            info!(
+                managed_instances = preflight.managed_instances,
+                "Akamai provider preflight succeeded"
+            );
             if reap_orphans {
                 let active = compute_repository.list_active_akamai().await?;
                 let summary = manager
@@ -128,7 +259,7 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         agents.clone(),
     );
     let server_service = ServerService::new(server_repository, reconcile_scheduler.clone());
-    let server_instance_service = ServerInstanceService::new(instance_repository);
+    let server_instance_service = ServerInstanceService::new(instance_repository.clone());
     let rpc_handler = ClientRpcHandler::new(
         server_service,
         server_instance_service,
@@ -144,21 +275,39 @@ async fn run(config: Config) -> Result<(), ControlPlaneError> {
         config.agent_command_timeout,
     )
     .await?;
-    let remote_agent_server = match config.remote_agent.as_ref() {
-        Some(remote) => Some(
-            TlsAgentServer::bind(
-                remote.listen_address,
-                &remote.tls_certificate,
-                &remote.tls_private_key,
-                agents.clone(),
-                compute_repository.clone(),
-                reconcile_scheduler.clone(),
-                config.max_frame_bytes,
-                config.agent_command_timeout,
-            )
+    let remote_agent_server = match (config.remote_agent.as_ref(), r2_credentials) {
+        (Some(remote), Some(r2_credentials)) => Some(
+            TlsAgentServer::bind(TlsAgentServerOptions {
+                address: remote.listen_address,
+                certificate_path: remote.tls_certificate.clone(),
+                private_key_path: remote.tls_private_key.clone(),
+                client_ca_certificate_path: remote.client_ca_certificate.clone(),
+                certificate_authority: remote_certificate_authority
+                    .clone()
+                    .ok_or_else(|| ControlPlaneError::InvalidConfiguration(
+                        "remote agent certificate authority is unavailable".to_owned(),
+                    ))?,
+                r2_credentials,
+                registry: agents.clone(),
+                compute_repository: compute_repository.clone(),
+                server_instance_repository: instance_repository.clone(),
+                reconcile_scheduler: reconcile_scheduler.clone(),
+                max_frame_bytes: config.max_frame_bytes,
+                command_timeout: config.agent_command_timeout,
+            })
             .await?,
         ),
-        None => None,
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(ControlPlaneError::InvalidConfiguration(
+                "remote Akamai agent listener requires R2 temporary credentials".to_owned(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(ControlPlaneError::InvalidConfiguration(
+                "R2 temporary credentials require the remote Akamai agent listener".to_owned(),
+            ));
+        }
     };
     let socket_server = UnixSocketServer::bind(
         config.socket_path,
@@ -322,6 +471,10 @@ enum ControlPlaneError {
     Repository(#[from] mcserver_control_plane::infrastructure::RepositoryError),
     #[error("compute operation failed: {0}")]
     Compute(#[from] ComputeError),
+    #[error("agent certificate operation failed: {0}")]
+    Certificate(#[from] AgentCertificateError),
+    #[error("R2 temporary credential operation failed: {0}")]
+    R2TemporaryCredential(#[from] R2TemporaryCredentialError),
     #[error("control-plane configuration is inconsistent: {0}")]
     InvalidConfiguration(String),
     #[error("client JSON-RPC socket failed")]

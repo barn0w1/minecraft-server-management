@@ -24,20 +24,45 @@ def strip_global_options(arguments: list[str]) -> list[str]:
     return result
 
 
-def repository_from(arguments: list[str]) -> tuple[Path, list[str]]:
+def normalize_repository(value: str) -> tuple[Path, bool]:
+    if value.startswith("s3:https://"):
+        runtime_value = os.environ.get("MCSERVER_FAKE_RUNTIME_DIRECTORY")
+        if not runtime_value:
+            raise ValueError("remote fake restic repository requires MCSERVER_FAKE_RUNTIME_DIRECTORY")
+        digest = hashlib.sha256(value.encode()).hexdigest()
+        return Path(runtime_value) / "restic-repositories" / digest, True
+    return Path(value), False
+
+
+def repository_from(arguments: list[str]) -> tuple[Path, list[str], bool]:
     arguments = list(arguments)
     for option in ("--repo", "-r"):
         if option in arguments:
             index = arguments.index(option)
             if index + 1 >= len(arguments):
                 raise ValueError(f"{option} requires a value")
-            repository = Path(arguments[index + 1])
+            repository, remote = normalize_repository(arguments[index + 1])
             del arguments[index : index + 2]
-            return repository, arguments
+            return repository, arguments, remote
     value = os.environ.get("RESTIC_REPOSITORY")
     if not value:
         raise ValueError("RESTIC_REPOSITORY or --repo is required")
-    return Path(value), arguments
+    repository, remote = normalize_repository(value)
+    return repository, arguments, remote
+
+
+def validate_remote_credentials() -> None:
+    required = (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_DEFAULT_REGION",
+    )
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        raise ValueError(f"remote fake restic credentials are incomplete: {missing!r}")
+    if os.environ["AWS_DEFAULT_REGION"] != "auto":
+        raise ValueError("Cloudflare R2 requires AWS_DEFAULT_REGION=auto")
 
 
 def metadata_path(repository: Path) -> Path:
@@ -154,7 +179,9 @@ def should_fail_once(command: str) -> bool:
 
 def main() -> int:
     try:
-        repository, arguments = repository_from(strip_global_options(sys.argv[1:]))
+        repository, arguments, remote = repository_from(strip_global_options(sys.argv[1:]))
+        if remote:
+            validate_remote_credentials()
         if not arguments:
             return fail("fake restic requires a command")
         command, rest = arguments[0], arguments[1:]

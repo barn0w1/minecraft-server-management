@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 const DEFAULT_PODMAN_BINARY: &str = "podman";
 const DEFAULT_RESTIC_BINARY: &str = "restic";
+const DEFAULT_OPENSSL_BINARY: &str = "openssl";
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_RESTIC_RETRY_LOCK_SECONDS: u64 = 300;
@@ -27,6 +28,7 @@ pub struct Config {
     pub local_scope: String,
     pub podman_binary: PathBuf,
     pub restic_binary: PathBuf,
+    pub openssl_binary: PathBuf,
     pub data_access_mode: DataAccessMode,
     pub max_frame_bytes: usize,
     pub command_timeout: Duration,
@@ -47,6 +49,7 @@ impl fmt::Debug for Config {
             .field("local_scope", &self.local_scope)
             .field("podman_binary", &self.podman_binary)
             .field("restic_binary", &self.restic_binary)
+            .field("openssl_binary", &self.openssl_binary)
             .field("data_access_mode", &self.data_access_mode)
             .field("max_frame_bytes", &self.max_frame_bytes)
             .field("command_timeout", &self.command_timeout)
@@ -104,6 +107,9 @@ impl Config {
         let restic_binary = env::var_os("MCSERVER_NODE_AGENT_RESTIC_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_RESTIC_BINARY));
+        let openssl_binary = env::var_os("MCSERVER_NODE_AGENT_OPENSSL_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_OPENSSL_BINARY));
         let data_access_mode = data_access_mode()?;
         let max_frame_bytes = parse_positive_usize(
             "MCSERVER_NODE_AGENT_MAX_FRAME_BYTES",
@@ -138,6 +144,7 @@ impl Config {
             local_scope,
             podman_binary,
             restic_binary,
+            openssl_binary,
             data_access_mode,
             max_frame_bytes,
             command_timeout,

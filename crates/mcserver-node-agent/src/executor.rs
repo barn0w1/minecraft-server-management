@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Output,
@@ -11,7 +12,7 @@ use mcserver_protocol::node_agent::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, process::Command};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::RwLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -34,12 +35,19 @@ const COMPUTE_INSTANCE_ID_LABEL: &str = "io.mcserver.compute-instance-id";
 #[derive(Debug, Clone)]
 pub struct AgentExecutor {
     config: Config,
+    runtime_environment: std::sync::Arc<RwLock<BTreeMap<String, String>>>,
 }
 
 impl AgentExecutor {
     #[must_use]
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(
+        config: Config,
+        runtime_environment: std::sync::Arc<RwLock<BTreeMap<String, String>>>,
+    ) -> Self {
+        Self {
+            config,
+            runtime_environment,
+        }
     }
 
     pub async fn inspect(
@@ -509,7 +517,9 @@ impl AgentExecutor {
             }
             DataAccessMode::Host => (Command::new(&self.config.restic_binary), "restic"),
         };
+        let runtime_environment = self.runtime_environment.read().await.clone();
         command
+            .envs(runtime_environment)
             .env("RESTIC_REPOSITORY", repository)
             .arg("--retry-lock")
             .arg(retry_lock)

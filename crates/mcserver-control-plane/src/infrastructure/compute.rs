@@ -38,6 +38,21 @@ impl ComputeManager {
         }
     }
 
+    #[must_use]
+    pub fn lifetime_exceeded(
+        &self,
+        compute: &ComputeInstance,
+        now: UnixTimestampMillis,
+    ) -> bool {
+        match compute.provider {
+            ComputeProvider::LocalProcess => false,
+            ComputeProvider::Akamai => self
+                .akamai
+                .as_ref()
+                .is_some_and(|manager| manager.lifetime_exceeded(compute, now)),
+        }
+    }
+
     pub async fn delete(&self, compute: &ComputeInstance) -> Result<bool, ComputeError> {
         match compute.provider {
             ComputeProvider::LocalProcess => self.local.delete(compute).await.map_err(Into::into),

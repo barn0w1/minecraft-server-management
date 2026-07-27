@@ -83,6 +83,18 @@ CREATE TABLE compute_instances (
         enrollment_token IS NULL
         OR (length(trim(enrollment_token)) > 0 AND length(enrollment_token) <= 256 AND instr(enrollment_token, char(0)) = 0)
     ),
+    agent_csr_pem TEXT CHECK (
+        agent_csr_pem IS NULL
+        OR (length(agent_csr_pem) > 0 AND length(agent_csr_pem) <= 32768 AND instr(agent_csr_pem, char(0)) = 0)
+    ),
+    agent_certificate_chain_pem TEXT CHECK (
+        agent_certificate_chain_pem IS NULL
+        OR (length(agent_certificate_chain_pem) > 0 AND length(agent_certificate_chain_pem) <= 65536 AND instr(agent_certificate_chain_pem, char(0)) = 0)
+    ),
+    agent_certificate_der BLOB CHECK (
+        agent_certificate_der IS NULL OR length(agent_certificate_der) BETWEEN 1 AND 65536
+    ),
+    agent_certificate_expires_at_ms INTEGER CHECK (agent_certificate_expires_at_ms >= 0),
     process_id INTEGER CHECK (process_id > 0),
     agent_connected_at_ms INTEGER CHECK (agent_connected_at_ms >= 0),
     shutdown_requested_at_ms INTEGER CHECK (shutdown_requested_at_ms >= 0),
@@ -96,9 +108,23 @@ CREATE TABLE compute_instances (
         OR (terminated_at_ms IS NOT NULL AND terminal_result IS NOT NULL)
     ),
     CHECK (
-        (provider = 'local_process' AND provider_instance_id IS NULL AND public_ipv4 IS NULL AND enrollment_token IS NULL)
+        (
+            provider = 'local_process'
+            AND provider_instance_id IS NULL
+            AND public_ipv4 IS NULL
+            AND enrollment_token IS NULL
+            AND agent_csr_pem IS NULL
+            AND agent_certificate_chain_pem IS NULL
+            AND agent_certificate_der IS NULL
+            AND agent_certificate_expires_at_ms IS NULL
+        )
         OR (provider = 'akamai' AND process_id IS NULL)
     ),
+    CHECK (
+        (agent_csr_pem IS NULL AND agent_certificate_chain_pem IS NULL AND agent_certificate_der IS NULL AND agent_certificate_expires_at_ms IS NULL)
+        OR (agent_csr_pem IS NOT NULL AND agent_certificate_chain_pem IS NOT NULL AND agent_certificate_der IS NOT NULL AND agent_certificate_expires_at_ms IS NOT NULL)
+    ),
+    CHECK (agent_certificate_expires_at_ms IS NULL OR agent_certificate_expires_at_ms >= created_at_ms),
     CHECK (agent_connected_at_ms IS NULL OR agent_connected_at_ms BETWEEN created_at_ms AND updated_at_ms),
     CHECK (shutdown_requested_at_ms IS NULL OR shutdown_requested_at_ms BETWEEN created_at_ms AND updated_at_ms),
     CHECK (terminated_at_ms IS NULL OR terminated_at_ms BETWEEN created_at_ms AND updated_at_ms),

@@ -1,8 +1,10 @@
-use std::{io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use mcserver_protocol::{
     json_rpc::{self, ErrorObject, Request, Response},
-    node_agent::{PROTOCOL_VERSION, RegisterParams, RegisterResult, method},
+    node_agent::{
+        EnrollParams, EnrollResult, PROTOCOL_VERSION, RegisterParams, RegisterResult, method,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,7 +21,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{Clock, ComputeInstanceId, ComputeProvider, SystemClock},
-    infrastructure::{AgentAuthentication, ComputeInstanceRepository},
+    infrastructure::{
+        AgentAuthentication, AgentCertificateAuthority, AgentCertificateRecord,
+        ComputeInstanceRepository, R2TemporaryCredentialManager, ServerInstanceRepository,
+    },
     reconciliation::ReconcileScheduler,
     shutdown::CancellationToken,
 };
@@ -44,7 +49,15 @@ struct ConnectionContext {
     max_frame_bytes: usize,
     command_timeout: Duration,
     expected_provider: ComputeProvider,
+    certificate_authority: Option<Arc<AgentCertificateAuthority>>,
+    server_instance_repository: Option<ServerInstanceRepository>,
+    r2_credentials: Option<Arc<R2TemporaryCredentialManager>>,
     clock: SystemClock,
+}
+
+struct AcceptedStream {
+    stream: BoxedAgentStream,
+    peer_certificate_der: Option<Vec<u8>>,
 }
 
 pub struct AgentServer {
@@ -72,6 +85,9 @@ impl AgentServer {
                 max_frame_bytes,
                 command_timeout,
                 expected_provider: ComputeProvider::LocalProcess,
+                certificate_authority: None,
+                server_instance_repository: None,
+                r2_credentials: None,
                 clock: SystemClock,
             },
         })
@@ -84,6 +100,21 @@ impl AgentServer {
     }
 }
 
+pub struct TlsAgentServerOptions {
+    pub address: SocketAddr,
+    pub certificate_path: PathBuf,
+    pub private_key_path: PathBuf,
+    pub client_ca_certificate_path: PathBuf,
+    pub certificate_authority: AgentCertificateAuthority,
+    pub r2_credentials: R2TemporaryCredentialManager,
+    pub registry: AgentRegistry,
+    pub compute_repository: ComputeInstanceRepository,
+    pub server_instance_repository: ServerInstanceRepository,
+    pub reconcile_scheduler: ReconcileScheduler,
+    pub max_frame_bytes: usize,
+    pub command_timeout: Duration,
+}
+
 pub struct TlsAgentServer {
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -91,19 +122,10 @@ pub struct TlsAgentServer {
 }
 
 impl TlsAgentServer {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn bind(
-        address: SocketAddr,
-        certificate_path: &Path,
-        private_key_path: &Path,
-        registry: AgentRegistry,
-        compute_repository: ComputeInstanceRepository,
-        reconcile_scheduler: ReconcileScheduler,
-        max_frame_bytes: usize,
-        command_timeout: Duration,
-    ) -> Result<Self, AgentServerError> {
-        let certificate = tokio::fs::read(certificate_path).await?;
-        let private_key = tokio::fs::read(private_key_path).await?;
+    pub async fn bind(options: TlsAgentServerOptions) -> Result<Self, AgentServerError> {
+        let certificate = tokio::fs::read(&options.certificate_path).await?;
+        let private_key = tokio::fs::read(&options.private_key_path).await?;
+        let client_ca = tokio::fs::read(&options.client_ca_certificate_path).await?;
         let mut certificate_reader = std::io::BufReader::new(certificate.as_slice());
         let certificates =
             rustls_pemfile::certs(&mut certificate_reader).collect::<Result<Vec<_>, _>>()?;
@@ -119,36 +141,51 @@ impl TlsAgentServer {
                     "TLS private key file contains no supported private key".to_owned(),
                 )
             })?;
+        let mut client_ca_reader = std::io::BufReader::new(client_ca.as_slice());
+        let client_ca_certificates =
+            rustls_pemfile::certs(&mut client_ca_reader).collect::<Result<Vec<_>, _>>()?;
+        if client_ca_certificates.is_empty() {
+            return Err(AgentServerError::TlsConfiguration(
+                "agent client CA file contains no certificates".to_owned(),
+            ));
+        }
+        let mut client_roots = rustls::RootCertStore::empty();
+        for certificate in client_ca_certificates {
+            client_roots
+                .add(certificate)
+                .map_err(|error| AgentServerError::TlsConfiguration(error.to_string()))?;
+        }
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .allow_unauthenticated()
+            .build()
+            .map_err(|error| AgentServerError::TlsConfiguration(error.to_string()))?;
         let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
+            .with_client_cert_verifier(client_verifier)
             .with_single_cert(certificates, private_key)
             .map_err(|error| AgentServerError::TlsConfiguration(error.to_string()))?;
-        let listener = TcpListener::bind(address).await?;
-        info!(address = %listener.local_addr()?, "remote TLS node-agent listener is ready");
+        let listener = TcpListener::bind(options.address).await?;
+        info!(address = %listener.local_addr()?, "remote mTLS node-agent listener is ready");
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(Arc::new(server_config)),
             context: ConnectionContext {
-                registry,
-                compute_repository,
-                reconcile_scheduler,
-                max_frame_bytes,
-                command_timeout,
+                registry: options.registry,
+                compute_repository: options.compute_repository,
+                reconcile_scheduler: options.reconcile_scheduler,
+                max_frame_bytes: options.max_frame_bytes,
+                command_timeout: options.command_timeout,
                 expected_provider: ComputeProvider::Akamai,
+                certificate_authority: Some(Arc::new(options.certificate_authority)),
+                server_instance_repository: Some(options.server_instance_repository),
+                r2_credentials: Some(Arc::new(options.r2_credentials)),
                 clock: SystemClock,
             },
         })
     }
 
     pub async fn run(self, cancellation: CancellationToken) -> Result<(), AgentServerError> {
-        run_listener(
-            self.listener,
-            self.context,
-            Some(self.acceptor),
-            cancellation,
-        )
-        .await?;
-        info!("remote TLS node-agent listener stopped");
+        run_listener(self.listener, self.context, Some(self.acceptor), cancellation).await?;
+        info!("remote mTLS node-agent listener stopped");
         Ok(())
     }
 }
@@ -176,29 +213,10 @@ async fn run_listener(
                 let acceptor = tls_acceptor.clone();
                 connections.spawn(async move {
                     let _connection_permit = connection_permit;
-                    let stream: Result<BoxedAgentStream, AgentServerError> = match acceptor {
-                        Some(acceptor) => match tokio::time::timeout(
-                            TLS_HANDSHAKE_TIMEOUT,
-                            acceptor.accept(stream),
-                        )
-                        .await
-                        {
-                            Ok(result) => result
-                                .map(|stream| Box::new(stream) as BoxedAgentStream)
-                                .map_err(AgentServerError::TlsHandshake),
-                            Err(_) => Err(AgentServerError::TlsHandshakeTimeout),
-                        },
-                        None => Ok(Box::new(stream) as BoxedAgentStream),
-                    };
+                    let stream = accept_stream(stream, acceptor).await;
                     match stream {
                         Ok(stream) => {
-                            if let Err(error) = handle_connection(
-                                stream,
-                                context,
-                                child_cancellation,
-                            )
-                            .await
-                            {
+                            if let Err(error) = handle_connection(stream, context, child_cancellation).await {
                                 warn!(%peer, %error, "node-agent connection ended with an error");
                             }
                         }
@@ -222,11 +240,41 @@ async fn run_listener(
     Ok(())
 }
 
+async fn accept_stream(
+    stream: tokio::net::TcpStream,
+    acceptor: Option<TlsAcceptor>,
+) -> Result<AcceptedStream, AgentServerError> {
+    let Some(acceptor) = acceptor else {
+        return Ok(AcceptedStream {
+            stream: Box::new(stream),
+            peer_certificate_der: None,
+        });
+    };
+    let stream = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+        .await
+        .map_err(|_| AgentServerError::TlsHandshakeTimeout)?
+        .map_err(AgentServerError::TlsHandshake)?;
+    let peer_certificate_der = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .map(|certificate| certificate.as_ref().to_vec());
+    Ok(AcceptedStream {
+        stream: Box::new(stream),
+        peer_certificate_der,
+    })
+}
+
 async fn handle_connection(
-    stream: BoxedAgentStream,
+    accepted: AcceptedStream,
     context: ConnectionContext,
     cancellation: CancellationToken,
 ) -> Result<(), AgentServerError> {
+    let AcceptedStream {
+        stream,
+        peer_certificate_der,
+    } = accepted;
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let request = tokio::time::timeout(
@@ -235,78 +283,42 @@ async fn handle_connection(
     )
     .await
     .map_err(|_| AgentServerError::RegistrationTimeout)??;
-    if !request.id.is_valid() {
-        write_response(
-            &mut writer,
-            &Response::error(
-                Value::Null,
-                ErrorObject::new(
-                    json_rpc::error_code::INVALID_REQUEST,
-                    "Invalid registration",
-                ),
-            ),
-        )
-        .await?;
-        return Err(AgentServerError::Protocol(
-            "registration request id is invalid".to_owned(),
-        ));
+    let response_id = request_id(&request, &mut writer).await?;
+    if request.jsonrpc != json_rpc::VERSION {
+        reject_registration(&mut writer, response_id, "Invalid JSON-RPC version").await?;
+        return Ok(());
     }
-    let response_id = request
-        .id
-        .response_id()
-        .ok_or_else(|| AgentServerError::Protocol("registration must be a request".to_owned()))?;
 
-    if request.jsonrpc != json_rpc::VERSION || request.method != method::AGENT_REGISTER {
-        write_response(
+    if request.method == method::AGENT_ENROLL {
+        return handle_enrollment(
+            request,
+            response_id,
             &mut writer,
-            &Response::error(
-                response_id,
-                ErrorObject::new(
-                    json_rpc::error_code::INVALID_REQUEST,
-                    "Invalid registration",
-                ),
-            ),
+            &context,
+            peer_certificate_der.as_deref(),
         )
-        .await?;
+        .await;
+    }
+    if request.method != method::AGENT_REGISTER {
+        reject_registration(&mut writer, response_id, "Invalid registration").await?;
         return Err(AgentServerError::Protocol(
-            "first node-agent request must be agent.register".to_owned(),
+            "first node-agent request must be agent.enroll or agent.register".to_owned(),
         ));
     }
 
     let params = match serde_json::from_value::<RegisterParams>(request.params) {
         Ok(params) => params,
         Err(error) => {
-            write_response(
-                &mut writer,
-                &Response::error(
-                    response_id,
-                    ErrorObject::new(
-                        json_rpc::error_code::INVALID_PARAMS,
-                        "Invalid registration params",
-                    )
-                    .with_data(json!({ "detail": error.to_string() })),
-                ),
-            )
-            .await?;
+            reject_invalid_params(&mut writer, response_id, error).await?;
             return Ok(());
         }
     };
-    if params.protocol_version != PROTOCOL_VERSION {
-        write_response(
-            &mut writer,
-            &Response::error(
-                response_id,
-                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Protocol mismatch")
-                    .with_data(json!({
-                        "expected": PROTOCOL_VERSION,
-                        "actual": params.protocol_version,
-                    })),
-            ),
-        )
-        .await?;
-        return Err(AgentServerError::Protocol(
-            "node-agent protocol version mismatch".to_owned(),
-        ));
+    if !validate_protocol_version(params.protocol_version, &mut writer, response_id.clone()).await? {
+        return Ok(());
+    }
+    if context.expected_provider == ComputeProvider::Akamai && peer_certificate_der.is_none() {
+        reject_registration(&mut writer, response_id, "Client certificate required").await?;
+        return Ok(());
     }
 
     let compute_id = ComputeInstanceId::from_uuid(params.compute_instance_id);
@@ -318,23 +330,33 @@ async fn handle_connection(
         reject_registration(&mut writer, response_id, "Registration rejected").await?;
         return Ok(());
     }
-
     let connected_at = context.clock.now()?;
-    let replacement_connection_token = match context
+    if context
         .compute_repository
         .authenticate_agent(
             compute_id,
             context.expected_provider,
             &params.connection_token,
+            peer_certificate_der.as_deref(),
             connected_at,
         )
         .await?
+        != AgentAuthentication::Accepted
     {
-        AgentAuthentication::Accepted => None,
-        AgentAuthentication::ReplaceToken(token) => Some(token),
-        AgentAuthentication::Rejected => {
-            reject_registration(&mut writer, response_id, "Registration rejected").await?;
-            return Ok(());
+        reject_registration(&mut writer, response_id, "Registration rejected").await?;
+        return Ok(());
+    }
+
+    let runtime_environment = match runtime_environment_for_registration(&context, &compute).await {
+        Ok(environment) => environment,
+        Err(error) => {
+            reject_registration(
+                &mut writer,
+                response_id,
+                "Temporary storage credentials unavailable",
+            )
+            .await?;
+            return Err(error);
         }
     };
 
@@ -344,30 +366,19 @@ async fn handle_connection(
             response_id,
             serde_json::to_value(RegisterResult {
                 accepted: true,
-                replacement_connection_token: replacement_connection_token.clone(),
+                runtime_environment,
             })?,
         ),
     )
     .await?;
 
-    if replacement_connection_token.is_some() {
-        info!(
-            compute_instance_id = %compute_id,
-            "remote node agent enrollment accepted; reconnect token issued"
-        );
-        return Ok(());
-    }
-
     let session_id = Uuid::new_v4();
     let (sender, receiver) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-    context
-        .registry
-        .register(compute_id, session_id, sender)
-        .await;
+    context.registry.register(compute_id, session_id, sender).await;
     context
         .reconcile_scheduler
         .enqueue_best_effort_for_instance(compute.server_instance_id);
-    info!(compute_instance_id = %compute_id, "node agent registered");
+    info!(compute_instance_id = %compute_id, mtls = peer_certificate_der.is_some(), "node agent registered");
 
     let result = run_session(
         &mut reader,
@@ -384,6 +395,214 @@ async fn handle_connection(
         .enqueue_best_effort_for_instance(compute.server_instance_id);
     info!(compute_instance_id = %compute_id, "node agent disconnected");
     result
+}
+
+async fn runtime_environment_for_registration(
+    context: &ConnectionContext,
+    compute: &crate::domain::ComputeInstance,
+) -> Result<std::collections::BTreeMap<String, String>, AgentServerError> {
+    if context.expected_provider == ComputeProvider::LocalProcess {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let instance_repository = context.server_instance_repository.as_ref().ok_or_else(|| {
+        AgentServerError::Protocol("server instance repository unavailable".to_owned())
+    })?;
+    let instance = instance_repository
+        .get(compute.server_instance_id)
+        .await?
+        .ok_or_else(|| AgentServerError::Protocol("server instance not found".to_owned()))?;
+    let manager = context.r2_credentials.as_ref().ok_or_else(|| {
+        AgentServerError::Protocol("R2 temporary credential manager unavailable".to_owned())
+    })?;
+    manager
+        .runtime_environment_for_repository(&instance.resolved_spec.data.repository)
+        .await
+        .map_err(AgentServerError::from)
+}
+
+async fn handle_enrollment<W>(
+    request: Request,
+    response_id: Value,
+    writer: &mut W,
+    context: &ConnectionContext,
+    peer_certificate_der: Option<&[u8]>,
+) -> Result<(), AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if context.expected_provider != ComputeProvider::Akamai || peer_certificate_der.is_some() {
+        reject_registration(writer, response_id, "Enrollment rejected").await?;
+        return Ok(());
+    }
+    let params = match serde_json::from_value::<EnrollParams>(request.params) {
+        Ok(params) => params,
+        Err(error) => {
+            reject_invalid_params(writer, response_id, error).await?;
+            return Ok(());
+        }
+    };
+    if !validate_protocol_version(params.protocol_version, writer, response_id.clone()).await? {
+        return Ok(());
+    }
+    let compute_id = ComputeInstanceId::from_uuid(params.compute_instance_id);
+    let Some(enrollment) = context
+        .compute_repository
+        .get_agent_enrollment(compute_id, &params.enrollment_token)
+        .await?
+    else {
+        reject_registration(writer, response_id, "Enrollment rejected").await?;
+        return Ok(());
+    };
+
+    let result = match (
+        enrollment.certificate_signing_request_pem,
+        enrollment.certificate_chain_pem,
+        enrollment.certificate_der,
+        enrollment.certificate_expires_at,
+    ) {
+        (Some(csr), Some(chain), Some(_), Some(_))
+            if csr == params.certificate_signing_request_pem =>
+        {
+            EnrollResult {
+                client_certificate_chain_pem: chain,
+                connection_token: enrollment.connection_token,
+            }
+        }
+        (None, None, None, None) => {
+            let certificate_authority = context
+                .certificate_authority
+                .as_ref()
+                .ok_or_else(|| AgentServerError::Protocol("certificate authority unavailable".to_owned()))?;
+            let issued_at = context.clock.now()?;
+            let signed = certificate_authority
+                .sign(
+                    compute_id,
+                    &params.certificate_signing_request_pem,
+                    issued_at,
+                )
+                .await?;
+            let recorded = context
+                .compute_repository
+                .record_agent_certificate(
+                    compute_id,
+                    &params.enrollment_token,
+                    &AgentCertificateRecord {
+                        certificate_signing_request_pem: params
+                            .certificate_signing_request_pem
+                            .clone(),
+                        certificate_chain_pem: signed.certificate_chain_pem.clone(),
+                        certificate_der: signed.leaf_der.clone(),
+                        certificate_expires_at: signed.expires_at,
+                        recorded_at: issued_at,
+                    },
+                )
+                .await?;
+            if recorded {
+                EnrollResult {
+                    client_certificate_chain_pem: signed.certificate_chain_pem,
+                    connection_token: enrollment.connection_token,
+                }
+            } else {
+                let Some(existing) = context
+                    .compute_repository
+                    .get_agent_enrollment(compute_id, &params.enrollment_token)
+                    .await?
+                else {
+                    reject_registration(writer, response_id, "Enrollment rejected").await?;
+                    return Ok(());
+                };
+                if existing.certificate_signing_request_pem.as_deref()
+                    != Some(params.certificate_signing_request_pem.as_str())
+                {
+                    reject_registration(writer, response_id, "Enrollment CSR changed").await?;
+                    return Ok(());
+                }
+                EnrollResult {
+                    client_certificate_chain_pem: existing
+                        .certificate_chain_pem
+                        .ok_or_else(|| AgentServerError::Protocol("incomplete enrollment state".to_owned()))?,
+                    connection_token: existing.connection_token,
+                }
+            }
+        }
+        _ => {
+            reject_registration(writer, response_id, "Enrollment CSR changed").await?;
+            return Ok(());
+        }
+    };
+
+    write_response(
+        writer,
+        &Response::success(response_id, serde_json::to_value(result)?),
+    )
+    .await?;
+    info!(compute_instance_id = %compute_id, "remote node-agent certificate enrollment accepted");
+    Ok(())
+}
+
+async fn request_id<W>(request: &Request, writer: &mut W) -> Result<Value, AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if !request.id.is_valid() {
+        write_response(
+            writer,
+            &Response::error(
+                Value::Null,
+                ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Invalid registration"),
+            ),
+        )
+        .await?;
+        return Err(AgentServerError::Protocol(
+            "registration request id is invalid".to_owned(),
+        ));
+    }
+    request
+        .id
+        .response_id()
+        .ok_or_else(|| AgentServerError::Protocol("registration must be a request".to_owned()))
+}
+
+async fn validate_protocol_version<W>(
+    actual: u32,
+    writer: &mut W,
+    response_id: Value,
+) -> Result<bool, AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if actual == PROTOCOL_VERSION {
+        return Ok(true);
+    }
+    write_response(
+        writer,
+        &Response::error(
+            response_id,
+            ErrorObject::new(json_rpc::error_code::INVALID_REQUEST, "Protocol mismatch")
+                .with_data(json!({ "expected": PROTOCOL_VERSION, "actual": actual })),
+        ),
+    )
+    .await?;
+    Ok(false)
+}
+
+async fn reject_invalid_params<W>(
+    writer: &mut W,
+    id: Value,
+    error: serde_json::Error,
+) -> Result<(), AgentServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_response(
+        writer,
+        &Response::error(
+            id,
+            ErrorObject::new(json_rpc::error_code::INVALID_PARAMS, "Invalid registration params")
+                .with_data(json!({ "detail": error.to_string() })),
+        ),
+    )
+    .await
 }
 
 async fn reject_registration<W>(
@@ -473,9 +692,7 @@ where
                 let result = tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
                     result = tokio::time::timeout(command_timeout, result) => {
-                        result
-                            .map_err(|_| AgentCallError::Timeout)
-                            .and_then(|result| result)
+                        result.map_err(|_| AgentCallError::Timeout).and_then(|result| result)
                     }
                 };
                 let session_unusable = matches!(
@@ -640,6 +857,10 @@ pub enum AgentServerError {
     RegistrationTimeout,
     #[error("node-agent registration persistence failed")]
     Repository(#[from] crate::infrastructure::RepositoryError),
+    #[error("node-agent certificate enrollment failed")]
+    Certificate(#[from] crate::infrastructure::AgentCertificateError),
+    #[error("node-agent temporary R2 credential issuance failed")]
+    R2TemporaryCredential(#[from] crate::infrastructure::R2TemporaryCredentialError),
     #[error("node-agent registration timestamp failed")]
     Timestamp(#[from] crate::domain::TimestampError),
 }
