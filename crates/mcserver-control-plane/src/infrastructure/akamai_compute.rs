@@ -26,6 +26,17 @@ const MAX_API_ERROR_BODY_BYTES: usize = 64 * 1024;
 const CLOUD_INIT_CAPABILITY: &str = "cloud-init";
 const METADATA_CAPABILITY: &str = "Metadata";
 
+struct InstanceProvisioningRequest<'a> {
+    label: &'a str,
+    region: &'a str,
+    instance_type: &'a str,
+    image: &'a str,
+    firewall_id: Option<u64>,
+    instance: &'a ServerInstance,
+    compute: &'a ComputeInstance,
+    allow_create: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AkamaiOrphanReapSummary {
     pub instances_adopted: usize,
@@ -185,31 +196,31 @@ impl AkamaiComputeManager {
                             provider_instance_id = provider_id,
                             "persisted Akamai instance no longer exists; recreating"
                         );
-                        self.find_or_create_instance(
-                            &label,
+                        self.find_or_create_instance(InstanceProvisioningRequest {
+                            label: &label,
                             region,
                             instance_type,
                             image,
                             firewall_id,
                             instance,
-                            &compute,
-                            instance.data_prepared_at.is_none(),
-                        )
+                            compute: &compute,
+                            allow_create: instance.data_prepared_at.is_none(),
+                        })
                         .await?
                     }
                 }
             }
             None => {
-                self.find_or_create_instance(
-                    &label,
+                self.find_or_create_instance(InstanceProvisioningRequest {
+                    label: &label,
                     region,
                     instance_type,
                     image,
                     firewall_id,
                     instance,
-                    &compute,
-                    instance.data_prepared_at.is_none(),
-                )
+                    compute: &compute,
+                    allow_create: instance.data_prepared_at.is_none(),
+                })
                 .await?
             }
         };
@@ -244,15 +255,18 @@ impl AkamaiComputeManager {
 
     async fn find_or_create_instance(
         &self,
-        label: &str,
-        region: &str,
-        instance_type: &str,
-        image: &str,
-        firewall_id: Option<u64>,
-        instance: &ServerInstance,
-        compute: &ComputeInstance,
-        allow_create: bool,
+        request: InstanceProvisioningRequest<'_>,
     ) -> Result<ProviderInstance, AkamaiComputeError> {
+        let InstanceProvisioningRequest {
+            label,
+            region,
+            instance_type,
+            image,
+            firewall_id,
+            instance,
+            compute,
+            allow_create,
+        } = request;
         if let Some(existing) = self.client.find_instance_by_label(label).await? {
             if !existing.is_owned_by(label, &self.scope_tag()) {
                 return Err(AkamaiComputeError::ProviderOwnershipMismatch {

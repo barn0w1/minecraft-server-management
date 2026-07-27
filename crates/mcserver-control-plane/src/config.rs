@@ -399,7 +399,8 @@ fn validate_https_url(name: &'static str, value: &str) -> Result<(), ConfigError
     if url.scheme() != "https" {
         return Err(ConfigError::HttpsRequired { name });
     }
-    if url.host_str().is_none()
+    if !has_explicit_authority(value)
+        || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
@@ -413,6 +414,9 @@ fn validate_api_base_url(value: &str) -> Result<(), ConfigError> {
     let Ok(url) = reqwest::Url::parse(value) else {
         return Err(ConfigError::InvalidAkamaiApiBaseUrl(value.to_owned()));
     };
+    if !has_explicit_authority(value) {
+        return Err(ConfigError::InvalidAkamaiApiBaseUrl(value.to_owned()));
+    }
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -428,6 +432,8 @@ fn validate_api_base_url(value: &str) -> Result<(), ConfigError> {
         "http" => {
             host.eq_ignore_ascii_case("localhost")
                 || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
                     .parse::<IpAddr>()
                     .is_ok_and(|address| address.is_loopback())
         }
@@ -438,6 +444,13 @@ fn validate_api_base_url(value: &str) -> Result<(), ConfigError> {
     } else {
         Err(ConfigError::InvalidAkamaiApiBaseUrl(value.to_owned()))
     }
+}
+
+fn has_explicit_authority(value: &str) -> bool {
+    value
+        .split_once("://")
+        .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
+        .is_some_and(|authority| !authority.is_empty())
 }
 
 fn parse_bool(name: &'static str, default: bool) -> Result<bool, ConfigError> {
