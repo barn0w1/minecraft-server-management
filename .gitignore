@@ -6,6 +6,7 @@
 **/mutants.out*/
 rustc-ice-*.txt
 *.pdb
+/mcserver-production-report.json
 
 .idea/
 .vscode/

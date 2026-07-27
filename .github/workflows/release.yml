@@ -120,6 +120,8 @@ jobs:
           cp README.md SECURITY.md Cargo.lock dist/package/
           cp dist/BUILD-METADATA dist/package/
           cp -R deploy docs dist/package/
+          mkdir -p dist/package/scripts
+          cp scripts/live_akamai_e2e.py scripts/local_e2e.py dist/package/scripts/
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
           python3 scripts/generate_spdx_sbom.py \
@@ -133,7 +135,7 @@ jobs:
             -C dist/package \
             -czf "dist/minecraft-server-management-v${version}-${TARGET}.tar.gz" .
           rm -rf dist/package
-          (cd dist && sha256sum BUILD-METADATA SBOM.spdx.json mcserver-* minecraft-server-management-*.tar.gz > SHA256SUMS)
+          (cd dist && sha256sum BUILD-METADATA SBOM.spdx.json mcserver-* mcserverctl-* minecraft-server-management-*.tar.gz > SHA256SUMS)
 
       - name: Smoke test on AlmaLinux 10 and Debian 13
         shell: bash
@@ -162,6 +164,7 @@ jobs:
         with:
           subject-path: |
             dist/mcserver-*-v*-${{ env.TARGET }}
+            dist/mcserverctl-v*-${{ env.TARGET }}
             dist/minecraft-server-management-v*-${{ env.TARGET }}.tar.gz
           sbom-path: dist/SBOM.spdx.json
 

@@ -52,7 +52,7 @@ See [the remote provider checkpoint definition](remote-provider-checkpoint.md).
 - AlmaLinux systemd unit using credentials, dedicated user, and service hardening
 - private agent CA generation and installation helpers
 - Cloudflare R2 Temporary Credentials API with per-repository prefix scope
-- explicit billable two-generation live staging harness with cleanup
+- explicit billable two-generation live production harness with cleanup
 - secret-free pinned GitHub CI
 - tagged static musl release build with release-binary E2Es
 - AlmaLinux 10 and Debian 13 release smoke tests
@@ -65,13 +65,13 @@ The repository is ready for operator validation. Completion of the live checkpoi
 operator-owned Akamai token, existing firewall ID, DNS record, public server certificate, private
 agent CA, initialized R2 restic repository, and an explicitly confirmed billable run.
 
-## Next checkpoint: live staging evidence and operations
+## Next checkpoint: live production evidence and operations
 
 1. pass workspace checks and both deterministic E2Es on the final commit
 2. publish and verify an annotated attested GitHub Release
 3. install the control plane on AlmaLinux 10 with live creation disabled
 4. pass PKI, Akamai, DNS, and external TLS preflight
-5. run the explicit two-generation Akamai staging E2E
+5. run the explicit two-generation Akamai production E2E
 6. restart the control plane while a VM is active and verify mTLS reconnect without duplicate creation
 7. rotate the Cloudflare API token, restic password, and agent client CA in documented drills
 8. automate SQLite online backup, restore verification, and off-host retention

@@ -1,6 +1,6 @@
 # Production deployment checkpoint
 
-This checkpoint makes the repository ready for an operator-controlled, billable staging deployment.
+This checkpoint makes the repository ready for an operator-controlled, billable production deployment.
 It does not silently create cloud resources from CI. The final acceptance action remains an explicit
 operator command against the installed AlmaLinux 10 control plane.
 
@@ -260,7 +260,7 @@ MCSERVER_AKAMAI_REGION=jp-tyo-3
 MCSERVER_AKAMAI_IMAGE=linode/debian13
 ```
 
-Set the known existing firewall ID and keep the allowlist to the one intended staging type. The
+Set the known existing firewall ID and keep the allowlist to the one intended production type. The
 application may attach and inspect that firewall, but it never creates, modifies, or deletes the
 firewall itself.
 
@@ -298,7 +298,7 @@ mcserverctl --socket /run/mcserver/control-plane.sock ping
 Because the live flag is false, reconciliation cannot create a new Akamai allocation and startup
 orphan reaping cannot delete anything.
 
-## 8. Enable one billable staging allocation
+## 8. Enable one billable production allocation
 
 After preflight succeeds, set:
 
@@ -316,7 +316,7 @@ mcserverctl --socket /run/mcserver/control-plane.sock ping
 
 Do not enable `MCSERVER_AKAMAI_REAP_ORPHANS_ON_START` for the first live run.
 
-## 9. Run the explicit live two-generation acceptance test
+## 9. Run the explicit live two-generation production acceptance test
 
 The script cannot run without the exact billable confirmation phrase and explicit EULA acceptance:
 
@@ -375,12 +375,17 @@ secret-free CI passes
 annotated release publishes static attested artifacts
 AlmaLinux 10 service preflight passes with live creation disabled
 external DNS and TLS verification passes
-live two-generation staging E2E passes
+live two-generation production E2E passes
 final Akamai managed VM count is zero
 R2 contains both published generations under the configured repository prefix
 R2 parent S3 secret was never installed on the control plane or a node
 service restarts and node-agent mTLS reconnect recovery have been observed
 ```
+
+The individual commands above remain the diagnostic reference. Normal
+installation should use the single-command
+[automated production deployment](automated-production-deployment.md), which
+also writes a secret-free JSON report.
 
 The next checkpoint is operational hardening: certificate renewal automation, SQLite backup and restore
 drills, Cloudflare API-token rotation, metrics, event audit history, snapshot retention, and disaster recovery.

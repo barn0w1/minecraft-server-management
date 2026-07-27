@@ -169,4 +169,4 @@ python3 scripts/deterministic_e2e.py
 python3 scripts/remote_provider_e2e.py
 ```
 
-See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), [remote provider checkpoint](docs/remote-provider-checkpoint.md), [production deployment checkpoint](docs/production-deployment-checkpoint.md), and [roadmap](docs/roadmap.md).
+See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), [remote provider checkpoint](docs/remote-provider-checkpoint.md), [automated production deployment](docs/automated-production-deployment.md), [production deployment checkpoint](docs/production-deployment-checkpoint.md), and [roadmap](docs/roadmap.md).

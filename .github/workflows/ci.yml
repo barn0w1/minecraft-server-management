@@ -40,7 +40,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile scripts/*.py scripts/fakes/*.py
+          python3 -m py_compile scripts/*.py scripts/fakes/*.py deploy/*.py
+          python3 -m unittest discover -s deploy -p 'test_*.py'
           bash -n deploy/*.sh
           test_directory=$(mktemp -d)
           trap 'rm -rf "${test_directory}"' EXIT

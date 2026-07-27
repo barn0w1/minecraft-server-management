@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the billable two-generation Akamai staging acceptance test.
+"""Run the billable two-generation Akamai production acceptance test.
 
 This script talks only to an already-running production-configured control plane.
 It never receives Akamai, TLS, R2, or restic credentials. The control plane owns
@@ -24,7 +24,7 @@ CONFIRMATION = "I_UNDERSTAND_THIS_CREATES_BILLABLE_AKAMAI_RESOURCES"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create one staging Server and exercise two complete Akamai VM "
+            "Create one production acceptance Server and exercise two complete Akamai VM "
             "generations. This creates billable resources."
         )
     )
@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--accept-eula",
         action="store_true",
-        help="explicitly accept the Minecraft EULA for this staging server",
+        help="explicitly accept the Minecraft EULA for this acceptance server",
     )
     return parser.parse_args()
 
@@ -284,7 +284,7 @@ def main() -> int:
                 },
             },
         )
-        print(f"created staging server={server['id']} name={server['name']}")
+        print(f"created acceptance server={server['id']} name={server['name']}")
 
         server, first = run_generation(
             client,
@@ -315,7 +315,7 @@ def main() -> int:
             raise local.RpcError(f"final resource state is not empty: {final_status!r}")
 
         print(
-            "live Akamai staging checkpoint passed: mTLS enrollment, two VM "
+            "live Akamai production checkpoint passed: mTLS enrollment, two VM "
             "generations, restore, start, stop, snapshot publication, and provider "
             "cleanup all succeeded"
         )

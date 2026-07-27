@@ -1,0 +1,48 @@
+# Copy this file outside the Git checkout, replace every REPLACE_ value, and
+# keep it mode 0600. Values under [files] are paths on the AlmaLinux 10
+# control-plane host; secret contents never belong in this TOML file.
+
+[release]
+version = "v0.1.0"
+repository = "barn0w1/minecraft-server-management"
+target = "x86_64-unknown-linux-musl"
+checksums_sha256 = "f6be7d4595c5bb82fb9e6264cd17fc3bc1cee169faa2d9addf24203ebb1d55fb"
+expected_commit = "250f97ce91e29457e1749082dbcba1b1a298c649"
+
+[service]
+public_address = "agent.mcserver.hss-science.org:443"
+server_name = "agent.mcserver.hss-science.org"
+trust_domain = "hss-science.org"
+rust_log = "mcserver_control_plane=info,mcserver_protocol=info"
+
+[akamai]
+scope = "production"
+region = "jp-tyo-3"
+image = "linode/debian13"
+instance_type = "g6-nanode-1"
+firewall_id = 0 # REPLACE_WITH_EXISTING_FIREWALL_ID
+max_active_instances = 1
+max_instance_lifetime_seconds = 43200
+
+[r2]
+account_id = "REPLACE_WITH_32_HEX_ACCOUNT_ID"
+parent_access_key_id = "REPLACE_WITH_PARENT_R2_ACCESS_KEY_ID"
+bucket = "REPLACE_WITH_DEDICATED_BUCKET"
+temporary_credential_ttl_seconds = 46800
+
+[files]
+akamai_api_token = "/root/mcserver-production/akamai-api-token"
+r2_api_token = "/root/mcserver-production/r2-api-token"
+remote_tls_private_key = "/root/mcserver-production/remote-tls-private-key.pem"
+agent_client_ca_private_key = "/root/mcserver-production/agent-client-ca/agent-client-ca-private-key.pem"
+r2_runtime_environment = "/root/mcserver-production/r2-runtime.env"
+remote_tls_fullchain = "/root/mcserver-production/remote-tls-fullchain.pem"
+remote_tls_root_ca = "/root/mcserver-production/remote-tls-root-ca.pem"
+agent_client_ca_certificate = "/root/mcserver-production/agent-client-ca/agent-client-ca.pem"
+authorized_keys = "/root/mcserver-production/authorized_keys"
+
+[acceptance]
+# Initialize this exact prefix as a restic repository before --go-live.
+repository = "s3:https://REPLACE_WITH_32_HEX_ACCOUNT_ID.r2.cloudflarestorage.com/REPLACE_WITH_DEDICATED_BUCKET/production-acceptance"
+host_port = 25565
+timeout_seconds = 3600

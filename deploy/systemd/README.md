@@ -48,5 +48,12 @@ mcserverctl --socket /run/mcserver/control-plane.sock ping
 existing firewall, and managed-instance limit before binding the service. Live-disabled mode blocks new billable creation and startup orphan
 reaping, but it does not prevent a known ownership-verified VM from being stopped and deleted.
 
-The full DNS, TLS, R2, GitHub Release, live acceptance, rollback, and credential procedures are in
+For a repeatable installation, use
+[`deploy/production_deploy.py`](../production_deploy.py) and its
+[`configuration example`](../production-deploy.toml.example). The script
+performs immutable release verification, installation, no-create preflight,
+service and TLS verification, and the optional live two-generation acceptance
+test while producing a secret-free JSON report.
+
+The full security boundary and manual reference procedures are in
 [`docs/production-deployment-checkpoint.md`](../../docs/production-deployment-checkpoint.md).
