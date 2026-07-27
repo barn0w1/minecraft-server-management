@@ -23,48 +23,72 @@
 
 See [the pre-cloud checkpoint definition](pre-cloud-checkpoint.md).
 
-## Implemented: remote Akamai provider checkpoint
+## Completed: remote Akamai provider checkpoint
 
-- provider-neutral compute dispatch preserving the proven local provider
-- real Akamai/Linode API v4 HTTP adapter for create, list, get, and delete
-- image and region capability preflight before billable creation
-- deterministic provider labels plus managed and installation-scope tags
-- ownership verification before adoption or deletion
-- recovery after a provider-side create succeeds but its response is lost
-- structured API errors, pagination, `X-Filter`, request timeouts, and `Retry-After`
-- opt-in scoped Akamai orphan adoption/deletion during startup
-- separate remote TLS agent listener with server-name and CA verification
-- one-time cloud-init enrollment token rotated into a persisted reconnect token
-- cloud-init installation with HTTPS download and SHA-256 verification
-- systemd supervision of the remote node agent
-- credential delivery boundary for restic and R2-compatible object storage
+- provider-neutral compute dispatch preserving the local provider
+- real Akamai/Linode API v4 create, list, get, firewall-observation, and delete adapter
+- image, region, instance-type, and existing-firewall preflight
+- deterministic labels plus managed and installation-scope tags
+- adoption after uncertain create responses and convergence after uncertain delete responses
+- structured API errors, pagination, request timeouts, and `Retry-After`
+- direct remote TLS listener and node-generated P-256 private key
+- one-time enrollment, CSR signing, and exact per-Compute mTLS authentication
+- cloud-init installation with immutable HTTPS release and SHA-256 verification
+- post-mTLS issuance and in-memory delivery of prefix-scoped R2 temporary credentials
+- systemd supervision of the remote root node agent
 - deterministic remote E2E using the real daemons, rustls transport, and reqwest adapter
 
 See [the remote provider checkpoint definition](remote-provider-checkpoint.md).
 
-The implementation checkpoint is accepted only after the workspace and both deterministic E2Es pass. A live Akamai deployment is deliberately separate because it is billable and requires operator-owned DNS, TLS, firewall, API, binary-distribution, and object-storage credentials.
+## Implemented: production deployment checkpoint
 
-## Next checkpoint: live remote vertical slice
+- fixed AlmaLinux 10 control-plane and Debian 13 `jp-tyo-3` node profile
+- Cloudflare DNS-only endpoint at `agent.mcserver.hss-science.org:443`
+- direct control-plane TLS termination with private client CA mTLS
+- PKI preflight for key matching, server name, remaining validity, and issuance lifetime
+- immutable existing firewall ID and provider specification allowlists
+- explicit live-create gate, one-instance limit, and maximum VM lifetime
+- deletion remains available after live creation is disabled
+- AlmaLinux systemd unit using credentials, dedicated user, and service hardening
+- private agent CA generation and installation helpers
+- Cloudflare R2 Temporary Credentials API with per-repository prefix scope
+- explicit billable two-generation live staging harness with cleanup
+- secret-free pinned GitHub CI
+- tagged static musl release build with release-binary E2Es
+- AlmaLinux 10 and Debian 13 release smoke tests
+- deterministic archive, SHA-256 manifest, SPDX SBOM, and GitHub artifact attestation
+- Dependabot configuration and repository security policy
 
-1. refresh and commit `Cargo.lock` with the pinned Rust toolchain
-2. deploy the control plane on the intended persistent VM
-3. validate public DNS, TLS chain, and remote listener reachability
-4. publish a target-compatible node-agent binary and verify its SHA-256
-5. create a dedicated least-privilege Akamai API token and firewall
-6. initialize the R2-backed restic repository with isolated credentials
-7. run one smallest-instance two-generation Minecraft lifecycle
-8. interrupt create, control-plane, agent, stop, and delete paths to verify recovery
-9. inspect provider billing and orphan state before enabling startup reaping
-10. validate and document the Debian 13 (`linode/debian13`) / Tokyo 3 (`jp-tyo-3`) production profile, systemd, Podman, and network assumptions
+See [the production deployment checkpoint](production-deployment-checkpoint.md).
+
+The repository is ready for operator validation. Completion of the live checkpoint requires the
+operator-owned Akamai token, existing firewall ID, DNS record, public server certificate, private
+agent CA, initialized R2 restic repository, and an explicitly confirmed billable run.
+
+## Next checkpoint: live staging evidence and operations
+
+1. pass workspace checks and both deterministic E2Es on the final commit
+2. publish and verify an annotated attested GitHub Release
+3. install the control plane on AlmaLinux 10 with live creation disabled
+4. pass PKI, Akamai, DNS, and external TLS preflight
+5. run the explicit two-generation Akamai staging E2E
+6. restart the control plane while a VM is active and verify mTLS reconnect without duplicate creation
+7. rotate the Cloudflare API token, restic password, and agent client CA in documented drills
+8. automate SQLite online backup, restore verification, and off-host retention
+9. record billing, provider inventory, logs, and R2 snapshots as live-checkpoint evidence
+10. enable scoped startup orphan reaping only after its ownership labels have been inspected
 
 ## Following checkpoints
 
-- replace direct remote Podman execution with Quadlet after the target image is validated
-- optional mutual TLS and external secret-manager integration
-- audit/event history and metrics
-- snapshot listing, explicit rollback, retention, prune, and repository checks
-- Unix-socket authorization and remote authenticated client gateway
-- Discord bot built on the same client API
-- disaster-recovery and production operations documentation
+- automated public server certificate renewal and controlled service restart
+- metrics, structured event audit history, and alerting
+- snapshot listing, explicit rollback, retention, prune, and repository integrity checks
+- disaster-recovery runbooks and periodic restore exercises
+- optional Quadlet execution after the Debian 13 target behavior is proven
+- Unix-socket authorization and an authenticated remote client gateway
+- Discord bot or web UI built on the same client API
+- multi-control-plane storage and leadership only when availability requirements justify it
 
-Continue to prefer complete vertical capabilities over generic frameworks. Add resources only for independent lifecycles, and extract provider traits from concrete implementations rather than speculative abstractions.
+Continue to prefer complete vertical capabilities over generic frameworks. Add resources only for
+independent lifecycles, preserve `/data` opacity, and extract provider traits from proven concrete
+implementations rather than speculative abstractions.

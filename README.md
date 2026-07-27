@@ -32,7 +32,7 @@ Server desired_state = running
   -> durable Akamai ComputeInstance and deterministic provider label
   -> Linode API create or adoption after an uncertain response
   -> cloud-init installs and verifies mcserver-node-agent
-  -> node agent enrolls over TLS and rotates to a persisted reconnect credential
+  -> node agent generates a private key, enrolls over TLS, and reconnects with an issued mTLS certificate
   -> the existing opaque restore, Minecraft, stop, snapshot, and publish flow runs remotely
   -> Linode API deletion removes the ephemeral VM
 ```
@@ -58,7 +58,7 @@ crates/
 - Rust edition: 2024
 - pinned toolchain: Rust 1.97.1
 - client API: JSON-RPC 2.0 over `/run/mcserver/control-plane.sock`
-- agent API: loopback TCP for local agents and server-authenticated TLS for remote agents
+- agent API: loopback TCP for local agents and direct TLS with private-CA mTLS for remote agents
 - persistence: SQLite
 - local data snapshots: restic
 - local Minecraft execution: rootless Podman and `itzg/minecraft-server`
@@ -139,7 +139,7 @@ python3 scripts/deterministic_e2e.py
 python3 scripts/remote_provider_e2e.py
 ```
 
-The remote provider verifier additionally exercises the production TLS transport and production Akamai HTTP client against a local fake API. It checks one-time enrollment, lost-create-response adoption, scoped orphan deletion, two generations, and VM deletion without using an API token or creating a real VM:
+The remote provider verifier additionally exercises the production mTLS transport, production Akamai HTTP client, and Cloudflare R2 Temporary Credentials API client against local fake APIs. It checks one-time CSR enrollment, exact certificate authentication, prefix-scoped session credentials, lost-create-response adoption, scoped orphan deletion, two generations, and VM deletion without using a real API token or creating a VM:
 
 ```bash
 python3 scripts/remote_provider_e2e.py
@@ -169,4 +169,4 @@ python3 scripts/deterministic_e2e.py
 python3 scripts/remote_provider_e2e.py
 ```
 
-See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), [remote provider checkpoint](docs/remote-provider-checkpoint.md), and [roadmap](docs/roadmap.md).
+See [architecture](docs/architecture.md), [client API](docs/client-api.md), [local execution](docs/local-execution.md), [development conventions](docs/development.md), [pre-cloud checkpoint](docs/pre-cloud-checkpoint.md), [remote provider checkpoint](docs/remote-provider-checkpoint.md), [production deployment checkpoint](docs/production-deployment-checkpoint.md), and [roadmap](docs/roadmap.md).

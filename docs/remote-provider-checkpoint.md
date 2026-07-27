@@ -1,38 +1,39 @@
 # Remote Akamai provider checkpoint
 
-This checkpoint is the deployable boundary immediately before a billable Akamai Cloud run. It adds the real Linode API client and the real remote-agent transport while keeping the acceptance test deterministic and free of cloud charges.
+This checkpoint proves the remote compute architecture without creating billable resources. The next
+operator-controlled boundary is the [production deployment checkpoint](production-deployment-checkpoint.md).
 
 ## Acceptance criteria
 
-The checkpoint is accepted when all of the following pass:
-
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo build --locked --workspace
 python3 scripts/deterministic_e2e.py
 python3 scripts/remote_provider_e2e.py
 ```
 
-The remote provider E2E starts the real control-plane and node-agent binaries. It uses a real TLS connection and the production `reqwest` Akamai adapter against a local fake Linode API, while substituting deterministic fake Podman and restic commands. It must prove:
+The remote provider E2E starts the real control plane and node agent, uses real TLS and client
+certificate enrollment, and drives the production `reqwest` Akamai adapter against a local fake API.
+Only Podman, restic, and the Akamai API are deterministic substitutes. It proves:
 
-- startup deletion of a scoped orphan Akamai instance
-- image `cloud-init` and region `Metadata` capability preflight before VM creation
-- a create request that succeeds provider-side but loses its response
-- adoption by deterministic provider label instead of duplicate creation
-- TLS server-name and CA validation
-- one-time bootstrap enrollment and replacement reconnect-token persistence
-- invalidation of the bootstrap enrollment token after reconnect
-- two complete generations with snapshot restore and fencing-token increase
-- provider deletion and remote-agent shutdown after each generation
-
-A live run is intentionally not part of CI because it requires a billable account, a real API token, public DNS/TLS, firewall policy, and object-storage credentials.
+- read-only image, region, instance-type, and existing-firewall preflight
+- `429 Retry-After` reconciliation delay
+- provider-side create success with a lost HTTP response
+- adoption by deterministic label instead of duplicate creation
+- one-time enrollment with a node-generated P-256 private key and CSR
+- client certificate issuance and mTLS reconnect
+- invalidation of the bootstrap enrollment token
+- runtime secret delivery only after authenticated mTLS registration
+- two complete restore/start/stop/snapshot generations
+- provider-side deletion with a lost HTTP response
+- final absence of managed compute resources
 
 ## Provider identity and uncertain responses
 
-Every Akamai-backed `ComputeInstance` gets:
+Every Akamai-backed `ComputeInstance` uses:
 
 ```text
 label: mcserver-<ComputeInstance UUID>
@@ -40,24 +41,22 @@ tag:   mcserver-managed
 tag:   mcserver-scope-<installation scope>
 ```
 
-Before creating a VM, the provider searches for the exact label. A timed-out or failed create response is therefore reconciled by discovery instead of issuing another create. The persisted provider ID is never sufficient by itself: GET and DELETE paths also verify the deterministic label and both ownership tags before controlling the VM.
+Create first searches for the exact label. GET, adoption, firewall verification, and DELETE revalidate
+the deterministic label and both ownership tags. A persisted provider ID is never sufficient on its
+own. A `404` after an uncertain DELETE is treated as successful convergence.
 
-A `404` from GET or DELETE means the provider resource is absent. If the VM disappears before writable data is prepared, it may be recreated. If prepared writable data exists and no result snapshot has been published, recreation from an older snapshot is refused and reconciliation reports possible data loss.
+A VM that disappears before writable data is prepared may be recreated. A VM that disappears after
+prepared writable data exists but before result snapshot publication is not recreated from an older
+snapshot; reconciliation reports possible writable-data loss.
 
-The optional startup reaper lists managed instances using `X-Filter`, paginates with a page size of 500, filters the installation scope again client-side, adopts a matching active database allocation, and deletes only scoped orphans. It is disabled by default because deletion is destructive.
+Startup orphan reaping is disabled by default, requires the live-operations flag, and is limited to the
+configured scope. Billable creation is also gated. Deletion of a persisted ownership-verified VM remains
+available when the live flag is disabled so an operator can block new charges without blocking cleanup.
 
 ## Linode API contract
 
-The adapter uses the Akamai Cloud Computing Linode API v4:
-
-- `GET /v4/images/{imageId}`
-- `GET /v4/regions/{regionId}`
-- `POST /v4/linode/instances`
-- `GET /v4/linode/instances`
-- `GET /v4/linode/instances/{id}`
-- `DELETE /v4/linode/instances/{id}`
-
-The create payload includes:
+The adapter uses the Linode API v4 endpoints for images, regions, types, firewalls, Linode instances,
+and a Linode's attached firewalls. The create request includes:
 
 ```json
 {
@@ -73,111 +72,86 @@ The create payload includes:
 }
 ```
 
-API errors preserve the bounded Linode `errors` array. HTTP `429` reads `Retry-After` seconds and feeds that delay into per-Server reconciliation backoff. The client uses bearer authentication, JSON, a bounded request timeout, and HTTPS except for loopback-only tests.
+Immediately before a create, the adapter checks that the image is available, not deprecated, and
+advertises `cloud-init`; that the region advertises `Metadata`; that the instance type exists; that the
+configured existing firewall exists and is enabled; and that the installation-scope managed instance
+limit is not reached. After create or adoption, it verifies region, image, type, and attached firewall.
 
-Immediately before a billable create request, the adapter verifies that the selected image is available, is not deprecated, and advertises the exact `cloud-init` capability. It also verifies that the selected region advertises the exact `Metadata` capability. A failed preflight prevents VM creation. The initial production target is `linode/debian13` in `jp-tyo-3`; the instance type and firewall remain explicit Server configuration rather than hidden provider defaults.
+HTTP errors retain the bounded Linode `errors` body. `429 Retry-After` participates in per-Server
+reconciliation scheduling. Redirects are disabled and production API URLs require HTTPS; only literal
+loopback endpoints may use HTTP for tests.
 
 Official references:
 
-- [Create a Linode](https://techdocs.akamai.com/linode-api/reference/post-linode-instance)
-- [Get an image](https://techdocs.akamai.com/linode-api/reference/get-image)
-- [Get a region](https://techdocs.akamai.com/linode-api/reference/get-region)
-- [List Linodes](https://techdocs.akamai.com/linode-api/reference/get-linode-instances)
-- [Get a Linode](https://techdocs.akamai.com/linode-api/reference/get-linode-instance)
-- [Delete a Linode](https://techdocs.akamai.com/linode-api/reference/delete-linode-instance)
-- [Filtering and sorting](https://techdocs.akamai.com/linode-api/reference/filtering-and-sorting)
-- [Pagination](https://techdocs.akamai.com/linode-api/reference/pagination)
-- [Rate limits](https://techdocs.akamai.com/linode-api/reference/rate-limits)
+- <https://techdocs.akamai.com/linode-api/reference/post-linode-instance>
+- <https://techdocs.akamai.com/linode-api/reference/get-image>
+- <https://techdocs.akamai.com/linode-api/reference/get-region>
+- <https://techdocs.akamai.com/linode-api/reference/get-linode-type>
+- <https://techdocs.akamai.com/linode-api/reference/get-firewall>
+- <https://techdocs.akamai.com/linode-api/reference/get-linode-firewalls>
+- <https://techdocs.akamai.com/linode-api/reference/get-linode-instances>
+- <https://techdocs.akamai.com/linode-api/reference/get-linode-instance>
+- <https://techdocs.akamai.com/linode-api/reference/delete-linode-instance>
+- <https://techdocs.akamai.com/linode-api/reference/filtering-and-sorting>
+- <https://techdocs.akamai.com/linode-api/reference/rate-limits>
 
 ## Remote-agent trust boundary
 
-The remote listener is separate from the loopback listener and requires TLS. The node agent initiates the connection; no inbound agent RPC port is opened on the ephemeral VM.
+The remote listener is separate from the loopback local-agent listener. Connections are always
+initiated by the ephemeral node.
 
-The control plane presents a certificate whose name matches `MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_SERVER_NAME`. The VM receives only the configured CA certificate and validates the server through rustls.
+The same TLS port supports two deliberately different states:
 
-Each Akamai allocation has two independent random secrets:
+1. an unauthenticated TLS client may submit only `agent.enroll` with an active one-time token and CSR
+2. every normal `agent.register` requires a client certificate signed by the private agent CA
 
-1. an enrollment token embedded in cloud-init
-2. a reconnect token retained only by the control-plane database
-
-The first TLS registration can use the enrollment token. The control plane returns the stable reconnect token and closes that enrollment session. The node agent writes the replacement token atomically as mode `0600`, then reconnects immediately. Registration with the reconnect token clears the enrollment token from SQLite. If the first response is lost, the still-valid enrollment token returns the same reconnect token, so enrollment remains idempotent.
-
-Both secrets are ComputeInstance-bound. Registration verifies the active allocation and expected provider. Terminating the ComputeInstance revokes both because inactive rows cannot authenticate. Configuration `Debug` implementations redact API and agent secrets.
-
-This checkpoint uses server-authenticated TLS plus high-entropy per-allocation bearer credentials. Mutual TLS and external secret-manager integration remain optional production hardening, not prerequisites for the first live vertical-slice validation.
-
-## Bootstrap and node supervision
-
-Akamai `metadata.user_data` contains a Base64-encoded shell bootstrap that:
-
-1. installs CA certificates, curl, Podman, and restic with `dnf` or `apt-get`
-2. installs the configured control-plane CA
-3. downloads the exact node-agent binary over HTTPS
-4. verifies its configured SHA-256 before installation
-5. writes a mode-`0600` environment file
-6. installs and starts a systemd service for the node agent
-
-The operator-supplied environment file may contain restic and object-storage credentials, but it may not override `MCSERVER_NODE_AGENT_*` keys. The Server's `data.repository` remains the authoritative opaque restic repository address.
-
-The remote node currently uses the same proven direct-Podman executor as the local vertical slice, supervised indirectly by the systemd-managed node agent. Data access is explicit: local unprivileged agents default to `podman_user_namespace`, while the root systemd service generated for remote VMs uses `host`. Restic, restore directory swaps, and cleanup therefore run in the same ownership boundary that created the data. Quadlet is deferred until the first real target image is validated because its rootless/rootful paths and unit-generation behavior are image- and systemd-version-sensitive.
-
-## Required control-plane configuration
-
-Remote TLS settings are all-or-none:
-
-```bash
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_LISTEN_ADDRESS='0.0.0.0:39002'
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_PUBLIC_ADDRESS='control.example.com:39002'
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_SERVER_NAME='control.example.com'
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CERTIFICATE='/etc/mcserver/tls/server.crt'
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_PRIVATE_KEY='/etc/mcserver/tls/server.key'
-export MCSERVER_CONTROL_PLANE_REMOTE_AGENT_TLS_CA_CERTIFICATE='/etc/mcserver/tls/ca.crt'
-export MCSERVER_CONTROL_PLANE_NODE_AGENT_DOWNLOAD_URL='https://downloads.example.com/mcserver-node-agent'
-export MCSERVER_CONTROL_PLANE_NODE_AGENT_SHA256='<64 lowercase hexadecimal characters>'
-```
-
-Akamai settings:
-
-```bash
-export MCSERVER_AKAMAI_API_TOKEN='<secret>'
-export MCSERVER_AKAMAI_API_BASE_URL='https://api.linode.com/v4'
-export MCSERVER_AKAMAI_AUTHORIZED_KEYS_FILE='/etc/mcserver/authorized_keys'
-export MCSERVER_AKAMAI_NODE_AGENT_ENVIRONMENT_FILE='/etc/mcserver/node-agent.env'
-export MCSERVER_AKAMAI_SCOPE='production'
-export MCSERVER_AKAMAI_REQUEST_TIMEOUT_SECONDS='30'
-export MCSERVER_AKAMAI_REAP_ORPHANS_ON_START='false'
-```
-
-The API token needs Linode read/write access. Keep it in the control-plane service credential environment or secret store; it is never sent to a node agent.
-
-Example node-agent environment for an R2-compatible restic repository:
+The control plane issues a certificate with a URI SAN of this form:
 
 ```text
-RESTIC_PASSWORD_FILE=/etc/mcserver/restic-password
-AWS_ACCESS_KEY_ID=<R2 access key>
-AWS_SECRET_ACCESS_KEY=<R2 secret key>
-AWS_DEFAULT_REGION=auto
+spiffe://hss-science.org/mcserver/compute/<ComputeInstance UUID>
 ```
 
-The Server's repository can then be an S3-compatible restic URL such as `s3:https://<account-id>.r2.cloudflarestorage.com/<bucket>/<server-prefix>`.
+Normal authentication requires all of the following:
 
-## Network and live-run handoff
+- active Akamai `ComputeInstance`
+- exact reconnect token
+- certificate chain accepted by rustls
+- exact leaf certificate DER stored for that ComputeInstance
+- unexpired database certificate lifetime
 
-Before a live run, the operator must provide:
+The private key is generated on the node and never crosses the network. The certificate and reconnect
+token are persisted atomically with mode `0600`. Enrollment is idempotent for the same CSR, so a lost
+response returns the previously recorded certificate and token. A successful mTLS reconnect clears the
+enrollment token from SQLite.
 
-- public DNS resolving the remote-agent TLS name to the control-plane VM
-- TCP access from ephemeral VMs to the remote-agent listener
-- a certificate chain trusted by the configured CA
-- an Akamai firewall that permits the Minecraft port and required outbound traffic
-- optional SSH access through the supplied public keys
-- an HTTPS location for the statically linked or otherwise target-compatible node-agent binary
-- an initialized restic repository and least-privilege R2 credentials
+## Bootstrap and runtime secrets
 
-The first production compatibility profile is:
+Akamai `metadata.user_data` installs `ca-certificates`, `curl`, `openssl`, Podman, and restic; installs
+the configured public server trust certificate; downloads one immutable node-agent release asset;
+verifies its SHA-256; and installs a hardened root systemd service.
+
+Cloud-init receives no R2 or restic secret. The control plane keeps the Cloudflare API token and
+parent R2 access key ID, while its operator-owned runtime file contains only the restic password and
+`AWS_DEFAULT_REGION=auto`. After each successful mTLS registration, the control plane issues an
+`object-read-write` R2 temporary credential scoped to the exact non-empty repository prefix. The access
+key, secret key, and session token are returned only in the registration response, held in node-agent
+memory, and added only to restic subprocesses. Long-lived S3 access keys are rejected from the runtime
+file.
+
+The remote root service uses host filesystem ownership mode. Local rootless execution continues to use
+`podman unshare`; the two ownership boundaries are explicit and are never mixed in one agent process.
+
+## Production profile
 
 ```text
-image:  linode/debian13
-region: jp-tyo-3
+control-plane endpoint: agent.mcserver.hss-science.org:443
+control-plane OS:       AlmaLinux 10
+node image:             linode/debian13
+region:                 jp-tyo-3
+firewall:               existing operator-managed firewall ID
+release target:         x86_64-unknown-linux-musl
 ```
 
-The first live run should use a dedicated scope, the smallest suitable instance type, a short manual observation window, and explicit desired-state stop before enabling startup orphan reaping.
+The production configuration, release workflow, DNS/TLS layout, systemd installation, R2 setup, live
+safety gates, and explicit billable E2E are documented in
+[production-deployment-checkpoint.md](production-deployment-checkpoint.md).

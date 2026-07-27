@@ -100,9 +100,9 @@ Two JSON-RPC interfaces are intentionally separate:
 
 They share the JSON-RPC envelope only. Their DTOs, methods, framing, trust boundary, and versioning are separate.
 
-The local agent listener binds only to a loopback address. The remote listener is separate and requires TLS with a configured CA and server name. Connections are always initiated by the node agent. A listener accepts only the expected provider, so an Akamai credential cannot register through the local boundary.
+The local agent listener binds only to a loopback address. The remote listener is separate, terminates TLS directly in the control plane, and validates a configured server certificate and private client CA. Connections are always initiated by the node agent. A listener accepts only the expected provider, so an Akamai credential cannot register through the local boundary.
 
-Local agents use a per-Compute reconnect token directly. Akamai cloud-init receives a separate one-time enrollment token. The first TLS registration returns the stable reconnect token and closes; the agent persists it mode `0600` and reconnects immediately. A successful reconnect clears the enrollment token from SQLite. Registration always requires an active ComputeInstance and matching provider.
+Local agents use a per-Compute reconnect token directly. Akamai cloud-init receives a separate one-time enrollment token. The remote node generates a P-256 private key locally and submits a CSR over server-authenticated TLS. The control plane records one issued certificate per active ComputeInstance and returns its chain with a stable reconnect token. The agent persists the key, chain, and token mode `0600`, then reconnects with mTLS. A successful mTLS registration clears the enrollment token from SQLite. Steady-state authentication requires the active ComputeInstance, exact reconnect token, exact recorded leaf certificate DER, valid certificate lifetime, and matching provider.
 
 The client API also has a reusable Unix-socket client and `mcserverctl`. `server.status` is a read-only projection combining the durable Server, its active instance and compute allocation, and current agent connectivity; it does not introduce another persisted phase or resource.
 
@@ -144,7 +144,7 @@ scope tag      = mcserver-scope-<installation scope>
 
 Create checks the exact label before issuing `POST`. This recovers a provider-side success whose HTTP response was lost. GET and DELETE revalidate label and tags before controlling a persisted provider ID. `429 Retry-After` participates in reconcile scheduling. Startup orphan deletion is opt-in and restricted to the configured scope.
 
-The cloud-init bootstrap installs the node agent as a systemd service, verifies the downloaded binary SHA-256, and supplies opaque restic/object-storage credentials through an operator-owned environment file. Minecraft remains managed by the same node-agent executor used by the proven local slice; provider code never interprets `/data`.
+The cloud-init bootstrap installs the node agent as a systemd service and verifies the immutable downloaded binary SHA-256. It contains no restic or object-storage credential. After mTLS authentication, the control plane derives the exact Server repository prefix, obtains a short-lived Cloudflare R2 `object-read-write` credential restricted to that prefix, and returns it with the restic password in memory. The node agent requires the access key, secret key, session token, and `AWS_DEFAULT_REGION=auto`, then applies them only to restic subprocesses. Long-lived S3 credentials are never persisted on a node. Minecraft remains managed by the same node-agent executor used by the proven local slice; provider code never interprets `/data`.
 
 ## Node data ownership boundary
 
