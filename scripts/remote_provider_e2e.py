@@ -764,6 +764,14 @@ def main() -> int:
                 },
             )
             server_id = str(server["id"])
+            client.call(
+                "server.set_desired_state",
+                {
+                    "server_id": server_id,
+                    "desired_state": "running",
+                    "expected_generation": server["generation"],
+                },
+            )
             previous: str | None = None
             snapshots: list[str] = []
             for generation in (1, 2):
